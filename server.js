@@ -23,14 +23,18 @@ const twilioClient  = new twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWI
 // Conversation history per phone number
 const conversations = {};
 
-// ── Profile loader ────────────────────────────────────────────────────────────
-async function loadProfile(whatsappNumber) {
-  // Twilio sends "whatsapp:+447..." — strip prefix, normalise spaces → +
-  const normalised = whatsappNumber
+// ── Phone normaliser ──────────────────────────────────────────────────────────
+function normalisePhone(raw) {
+  return raw
     .replace('whatsapp:', '')
     .trim()
-    .replace(/^\s/, '+')   // space at start (from URL-decoded +) → +
-    .replace(/^00/, '+');  // 00-prefixed → +
+    .replace(/^\s/, '+')
+    .replace(/^00/, '+');
+}
+
+// ── Profile loader ────────────────────────────────────────────────────────────
+async function loadProfile(whatsappNumber) {
+  const normalised = normalisePhone(whatsappNumber);
   const { data, error } = await supabase
     .from('profiles')
     .select('*')
@@ -195,6 +199,106 @@ MEMORY & SAVING:
 - When the user tells you something new about her family — a one-off event, a schedule change, a new contact, a reminder — acknowledge it naturally in your reply with a short confirmation like "Got it — noted Ellie's school trip on Tuesday" or "Saved — I've updated Lexie's activities."
 - Do this for: upcoming events, schedule changes, new tradespeople, reminders, anything that sounds like it should be remembered.
 - Keep the confirmation brief — one line at the end of your reply is enough.`;
+}
+
+// ── Onboarding ────────────────────────────────────────────────────────────────
+function parseChildren(text) {
+  const children = [];
+  for (const m of text.matchAll(/([A-Za-z''-]+)[\s,]+(?:aged?\s+)?(\d+)/gi)) {
+    children.push({ name: m[1], age: parseInt(m[2], 10) });
+  }
+  // Fallback: couldn't parse structured data, store raw
+  return children.length > 0 ? children : [{ name: text.trim(), age: null }];
+}
+
+function onboardingReprompt(step, state) {
+  switch (step) {
+    case 1: return "What's your name?";
+    case 2: return "How many children do you have?";
+    case 3: return 'What are their names and ages? (e.g. "Ella 8, Noah 5")';
+    case 4: return `What school${(state?.children || []).length !== 1 ? 's' : ''} do they go to?`;
+    case 5: return "What's the one thing you most want help keeping on top of?";
+    default: return "What's your name?";
+  }
+}
+
+async function handleOnboarding(phone, body, state) {
+  if (!state) {
+    await supabase.from('user_profiles').insert({ phone_number: phone, onboarding_step: 1 });
+    return "Welcome to Family CEO! 👋 I'm your personal family chief of staff — here to keep you organised and one step ahead.\n\nBefore we get started, I need to know a bit about your family. What's your name?";
+  }
+
+  const step = state.onboarding_step;
+
+  switch (step) {
+    case 1:
+      await supabase.from('user_profiles')
+        .update({ name: body.trim(), onboarding_step: 2 })
+        .eq('phone_number', phone);
+      return `Great, ${body.trim()}! How many children do you have?`;
+
+    case 2:
+      await supabase.from('user_profiles')
+        .update({ onboarding_step: 3 })
+        .eq('phone_number', phone);
+      return 'What are their names and ages? (e.g. "Ella 8, Noah 5")';
+
+    case 3: {
+      const children = parseChildren(body);
+      await supabase.from('user_profiles')
+        .update({ children, onboarding_step: 4 })
+        .eq('phone_number', phone);
+      return `Got it! What school${children.length !== 1 ? 's' : ''} do they go to?`;
+    }
+
+    case 4:
+      await supabase.from('user_profiles')
+        .update({ schools: body.trim(), onboarding_step: 5 })
+        .eq('phone_number', phone);
+      return "Almost done! What's the one thing you most want help keeping on top of?";
+
+    case 5:
+      await completeOnboarding(phone, { ...state, priorities: body.trim() });
+      return "Also — feel free to send me anything you want me to know about: school letters, medical info, schedules, a photo of the football rota on the fridge. I can read it all 📎\n\nPerfect. I'm ready. You're the CEO — I'll handle the detail. 🙌\n\nWhat would you like to start with?";
+
+    default:
+      return "Something went wrong with setup — send any message to try again.";
+  }
+}
+
+async function completeOnboarding(phone, data) {
+  const now = new Date().toISOString();
+
+  await supabase.from('user_profiles')
+    .update({ priorities: data.priorities, onboarded_at: now })
+    .eq('phone_number', phone);
+
+  // Populate the profiles table so the AI flow works immediately
+  const children = (data.children || []).map(c => ({
+    name:          c.name,
+    age:           c.age,
+    school:        data.schools || '',
+    year_group:    '',
+    dietary_needs: '',
+    allergies:     '',
+    activities:    '',
+    extra_needs:   '',
+  }));
+
+  await supabase.from('profiles').upsert({
+    whatsapp_number: phone,
+    mum_name:        data.name,
+    children,
+    household:       {},
+    preferences: {
+      extra_notes:   data.priorities || '',
+      briefing_time: '07:30',
+    },
+    notes:     [],
+    documents: [],
+  }, { onConflict: 'whatsapp_number' });
+
+  console.log(`✅ Onboarding complete for ${data.name} (${phone})`);
 }
 
 // ── Info extractor ────────────────────────────────────────────────────────────
@@ -682,17 +786,49 @@ ${text.slice(0, 8000)}`
 
 // ── WhatsApp webhook ──────────────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
-  const from      = req.body.From;
-  let   body      = req.body.Body || '';
-  const numMedia  = parseInt(req.body.NumMedia || '0', 10);
+  const from     = req.body.From;
+  let   body     = req.body.Body || '';
+  const numMedia = parseInt(req.body.NumMedia || '0', 10);
+  const phone    = normalisePhone(from);
 
   console.log(`📩 ${from}: ${body}${numMedia > 0 ? ` [+${numMedia} image(s)]` : ''}`);
 
   try {
+    // ── Onboarding gate ───────────────────────────────────────────────────────
+    const { data: onboarding } = await supabase
+      .from('user_profiles')
+      .select('*')
+      .eq('phone_number', phone)
+      .single();
+
+    if (!onboarding?.onboarded_at) {
+      if (numMedia > 0) {
+        // Save media reference but don't advance the step
+        const pending = [...(onboarding?.pending_media || []), {
+          url:  req.body.MediaUrl0,
+          type: req.body.MediaContentType0 || 'unknown',
+        }];
+        if (onboarding) {
+          await supabase.from('user_profiles').update({ pending_media: pending }).eq('phone_number', phone);
+        } else {
+          await supabase.from('user_profiles').insert({ phone_number: phone, pending_media: pending, onboarding_step: 1 });
+        }
+        const step = onboarding?.onboarding_step || 1;
+        const reprompt = onboardingReprompt(step, onboarding);
+        res.type('text/xml');
+        return res.send(buildTwimlResponse(`Got it — I'll come back to that once we've finished setup.\n\n${reprompt}`));
+      }
+
+      const reply = await handleOnboarding(phone, body, onboarding || null);
+      res.type('text/xml');
+      return res.send(buildTwimlResponse(reply));
+    }
+
+    // ── Fully onboarded — AI flow ─────────────────────────────────────────────
     // Handle image attachments — extract text via Claude vision
     if (numMedia > 0) {
-      const mediaUrl     = req.body.MediaUrl0;
-      const contentType  = req.body.MediaContentType0 || 'image/jpeg';
+      const mediaUrl    = req.body.MediaUrl0;
+      const contentType = req.body.MediaContentType0 || 'image/jpeg';
       console.log(`🖼️  Downloading image (${contentType}): ${mediaUrl}`);
       const { buffer, contentType: detected } = await downloadTwilioMedia(mediaUrl);
       const extracted = await extractTextFromImage(buffer, detected || contentType);
@@ -721,7 +857,6 @@ app.post('/webhook', async (req, res) => {
     }
 
     const reply = await getClaudeReply(from, body, profile);
-
     console.log(`📤 Claude: ${reply}`);
 
     res.type('text/xml');

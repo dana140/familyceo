@@ -48,3 +48,20 @@ create table if not exists reminders (
 
 alter table reminders enable row level security;
 create policy "Allow all" on reminders for all using (true) with check (true);
+
+-- Onboarding state and completed user profiles
+create table if not exists user_profiles (
+  id uuid primary key default gen_random_uuid(),
+  phone_number text unique not null,
+  name text,
+  children jsonb default '[]',
+  schools text,
+  priorities text,
+  pending_media jsonb default '[]',
+  onboarding_step int not null default 1,
+  onboarded_at timestamptz,
+  created_at timestamptz default now()
+);
+
+alter table user_profiles enable row level security;
+create policy "Allow all" on user_profiles for all using (true) with check (true);

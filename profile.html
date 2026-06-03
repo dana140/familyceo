@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Family CEO — Your Profile</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --purple: #7C3AED;
+      --purple-light: #EDE9FE;
+      --purple-mid: #A78BFA;
+      --text: #1F2937;
+      --muted: #6B7280;
+      --border: #E5E7EB;
+      --bg: #F9FAFB;
+      --card: #FFFFFF;
+      --danger: #EF4444;
+      --success: #10B981;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 40px 16px 80px;
+    }
+
+    .container { max-width: 680px; margin: 0 auto; }
+
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+    header .logo {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--purple);
+      margin-bottom: 8px;
+    }
+    header h1 {
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    header p {
+      font-size: 15px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      margin-bottom: 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+    .card-icon {
+      width: 36px; height: 36px;
+      background: var(--purple-light);
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+    }
+    .card-title { font-size: 17px; font-weight: 600; color: var(--text); }
+    .card-subtitle { font-size: 13px; color: var(--muted); margin-top: 2px; }
+
+    .field { margin-bottom: 18px; }
+    .field:last-child { margin-bottom: 0; }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+    label .optional {
+      font-weight: 400;
+      color: var(--muted);
+      margin-left: 4px;
+    }
+
+    input[type="text"],
+    input[type="tel"],
+    input[type="time"],
+    input[type="number"],
+    select,
+    textarea {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--text);
+      background: #fff;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      outline: none;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--purple-mid);
+      box-shadow: 0 0 0 3px rgba(124,58,237,0.1);
+    }
+    textarea { resize: vertical; min-height: 80px; }
+
+    .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+
+    @media (max-width: 520px) {
+      .row-2, .row-3 { grid-template-columns: 1fr; }
+    }
+
+    /* Children */
+    .child-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 14px;
+      position: relative;
+      background: #FAFAFA;
+    }
+    .child-number {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--purple);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 16px;
+    }
+    .remove-btn {
+      position: absolute;
+      top: 14px; right: 14px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1;
+      padding: 2px 6px;
+      border-radius: 6px;
+      transition: background 0.15s, color 0.15s;
+    }
+    .remove-btn:hover { background: #FEE2E2; color: var(--danger); }
+
+    .add-btn {
+      width: 100%;
+      padding: 11px;
+      border: 2px dashed var(--border);
+      border-radius: 10px;
+      background: none;
+      color: var(--purple);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+      font-family: inherit;
+      margin-top: 4px;
+    }
+    .add-btn:hover {
+      border-color: var(--purple-mid);
+      background: var(--purple-light);
+    }
+
+    /* Tradespeople */
+    .trade-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 10px;
+    }
+    .trade-row .remove-inline {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 14px;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .trade-row .remove-inline:hover { background: #FEE2E2; color: var(--danger); border-color: #FCA5A5; }
+
+    /* Tags / checkboxes */
+    .tag-group { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .tag-label {
+      display: flex; align-items: center; gap: 6px;
+      padding: 7px 14px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s;
+      user-select: none;
+    }
+    .tag-label:hover { border-color: var(--purple-mid); background: var(--purple-light); }
+    .tag-label input { display: none; }
+    .tag-label.checked { background: var(--purple); color: #fff; border-color: var(--purple); }
+
+    /* Upload */
+    .upload-area {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 32px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .upload-area:hover { border-color: var(--purple-mid); background: var(--purple-light); }
+    .upload-area input { display: none; }
+    .upload-icon { font-size: 32px; margin-bottom: 8px; }
+    .upload-area p { font-size: 14px; color: var(--muted); }
+    .upload-area strong { color: var(--purple); }
+    .file-list { margin-top: 12px; }
+    .file-item {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; color: var(--text);
+      background: var(--purple-light);
+      padding: 6px 12px;
+      border-radius: 8px;
+      margin-top: 6px;
+    }
+    .file-item span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Save button */
+    .save-wrap { text-align: center; margin-top: 32px; }
+    .save-btn {
+      background: var(--purple);
+      color: #fff;
+      border: none;
+      padding: 16px 48px;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.3s;
+      box-shadow: 0 4px 14px rgba(124,58,237,0.35);
+    }
+    .save-btn:hover { background: #6D28D9; box-shadow: 0 6px 20px rgba(124,58,237,0.45); transform: translateY(-1px); }
+    .save-btn:active { transform: translateY(0); }
+    .save-btn:disabled { background: var(--muted); box-shadow: none; cursor: not-allowed; transform: none; }
+    .save-btn.saved { background: var(--success); box-shadow: 0 4px 14px rgba(16,185,129,0.4); }
+    .save-btn.saved:hover { background: #059669; box-shadow: 0 6px 20px rgba(16,185,129,0.5); transform: translateY(-1px); }
+
+    .status {
+      margin-top: 16px;
+      padding: 16px 24px;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 500;
+      display: none;
+      text-align: center;
+    }
+    .status.success {
+      background: #D1FAE5;
+      color: #065F46;
+      display: block;
+      border: 1px solid #6EE7B7;
+      font-size: 16px;
+      padding: 20px 24px;
+      animation: popIn 0.3s ease;
+    }
+    .status.error { background: #FEE2E2; color: #991B1B; display: block; border: 1px solid #FCA5A5; }
+
+    @keyframes popIn {
+      0%   { transform: scale(0.95); opacity: 0; }
+      100% { transform: scale(1);    opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div class="logo">Family CEO</div>
+    <h1>Your Family Profile</h1>
+    <p>Set this up once and your AI chief of staff will use it every time you message.</p>
+  </header>
+
+  <!-- 1. About You -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">👩</div>
+      <div>
+        <div class="card-title">About You</div>
+        <div class="card-subtitle">Your basic info and contact details</div>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Your name</label>
+      <input type="text" id="mum_name" placeholder="Your first name" />
+    </div>
+    <div class="row-2">
+      <div class="field">
+        <label>WhatsApp number</label>
+        <input type="tel" id="whatsapp_number" placeholder="+44 7700 000000" />
+      </div>
+      <div class="field">
+        <label>Postcode <span class="optional">(optional)</span></label>
+        <input type="text" id="postcode" placeholder="e.g. SW1A 1AA" />
+      </div>
+    </div>
+    <div class="field">
+      <label>Location <span class="optional">(area / city)</span></label>
+      <input type="text" id="location" placeholder="e.g. Manchester, Edinburgh" />
+    </div>
+  </div>
+
+  <!-- 2. Children -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">🧒</div>
+      <div>
+        <div class="card-title">Your Children</div>
+        <div class="card-subtitle">Add as many as you need</div>
+      </div>
+    </div>
+
+    <div id="children-list"></div>
+    <button type="button" class="add-btn" onclick="addChild()">+ Add a child</button>
+  </div>
+
+  <!-- 3. Household -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">🏠</div>
+      <div>
+        <div class="card-title">Household</div>
+        <div class="card-subtitle">Cleaner, bin day, and tradespeople</div>
+      </div>
+    </div>
+
+    <div class="row-2">
+      <div class="field">
+        <label>Cleaner's name <span class="optional">(optional)</span></label>
+        <input type="text" id="cleaner_name" placeholder="Name" />
+      </div>
+      <div class="field">
+        <label>Cleaner's day <span class="optional">(optional)</span></label>
+        <select id="cleaner_day">
+          <option value="">— select day —</option>
+          <option>Monday</option><option>Tuesday</option><option>Wednesday</option>
+          <option>Thursday</option><option>Friday</option><option>Saturday</option><option>Sunday</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Bin day</label>
+      <select id="bin_day">
+        <option value="">— select day —</option>
+        <option>Monday</option><option>Tuesday</option><option>Wednesday</option>
+        <option>Thursday</option><option>Friday</option><option>Saturday</option><option>Sunday</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Tradespeople <span class="optional">(plumber, electrician, handyman…)</span></label>
+      <div id="trades-list"></div>
+      <button type="button" class="add-btn" style="margin-top:8px" onclick="addTrade()">+ Add tradesperson</button>
+    </div>
+  </div>
+
+  <!-- 4. Documents -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">📄</div>
+      <div>
+        <div class="card-title">Documents</div>
+        <div class="card-subtitle">School letters, passports, insurance — anything useful</div>
+      </div>
+    </div>
+
+    <label class="upload-area">
+      <input type="file" id="doc-upload" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" onchange="handleFiles(this)" />
+      <div class="upload-icon">📎</div>
+      <p><strong>Click to upload</strong> or drag and drop</p>
+      <p>PDF, Word, JPG, PNG</p>
+    </label>
+    <div class="file-list" id="file-list"></div>
+  </div>
+
+  <!-- 5. Preferences -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">⚙️</div>
+      <div>
+        <div class="card-title">Preferences</div>
+        <div class="card-subtitle">How and when you want to be helped</div>
+      </div>
+    </div>
+
+    <div class="row-2">
+      <div class="field">
+        <label>Morning briefing time</label>
+        <input type="time" id="briefing_time" value="07:30" />
+      </div>
+      <div class="field">
+        <label>Communication style</label>
+        <select id="communication_style">
+          <option value="concise">Concise — quick bullets</option>
+          <option value="warm">Warm — friendly and chatty</option>
+          <option value="direct">Direct — just the essentials</option>
+          <option value="detailed">Detailed — full context</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>What do you want me to help manage?</label>
+      <div class="tag-group" id="manage-tags">
+        <label class="tag-label" onclick="toggleTag(this)"><input type="checkbox" value="school" /> School & kids</label>
+        <label class="tag-label" onclick="toggleTag(this)"><input type="checkbox" value="appointments" /> Appointments</label>
+        <label class="tag-label" onclick="toggleTag(this)"><input type="checkbox" value="shopping" /> Shopping lists</label>
+        <label class="tag-label" onclick="toggleTag(this)"><input type="checkbox" value="household" /> Household tasks</label>
+        <label class="tag-label" onclick="toggleTag(this)"><input type="checkbox" value="events" /> Events & tickets</label>
+        <label class="tag-label" onclick="toggleTag(this)"><input type="checkbox" value="tradespeople" /> Tradespeople</label>
+        <label class="tag-label" onclick="toggleTag(this)"><input type="checkbox" value="meals" /> Meal planning</label>
+        <label class="tag-label" onclick="toggleTag(this)"><input type="checkbox" value="reminders" /> Reminders</label>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Anything else I should know? <span class="optional">(optional)</span></label>
+      <textarea id="extra_notes" placeholder="e.g. My youngest has a nut allergy. We do Shabbat on Fridays. Partner travels Mon–Thu..."></textarea>
+    </div>
+  </div>
+
+  <div class="save-wrap">
+    <button class="save-btn" id="save-btn" onclick="saveProfile()">Save My Profile</button>
+    <div class="status" id="status-msg"></div>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  // ── Supabase config ──────────────────────────────────────────────────────────
+  // Replace these with your Supabase project URL and anon key
+  // (Settings → API in your Supabase dashboard)
+  const SUPABASE_URL  = 'https://arukhuabxgpzkjnrftpg.supabase.co';
+  const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFydWtodWFieGdwemtqbnJmdHBnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MDc2MTAsImV4cCI6MjA5NTk4MzYxMH0.qpBJE3oDyQC5UfigMEuwbvktZQMuqY_zDFlNf_XA4Ys';
+  let db;
+  try {
+    db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+  } catch(e) {
+    console.error('Supabase init failed:', e);
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  let childCount = 0;
+  let uploadedFiles = [];
+
+  // ── Children ─────────────────────────────────────────────────────────────────
+  function addChild(data = {}) {
+    childCount++;
+    const id = `child-${childCount}`;
+    const div = document.createElement('div');
+    div.className = 'child-card';
+    div.id = id;
+    div.innerHTML = `
+      <div class="child-number">Child ${childCount}</div>
+      <button class="remove-btn" onclick="removeChild('${id}')" title="Remove">✕</button>
+      <div class="row-3">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" class="c-name" placeholder="e.g. Ellie" value="${data.name || ''}" />
+        </div>
+        <div class="field">
+          <label>Age</label>
+          <input type="number" class="c-age" placeholder="8" min="0" max="18" value="${data.age || ''}" />
+        </div>
+        <div class="field">
+          <label>Year group</label>
+          <input type="text" class="c-year" placeholder="e.g. Year 4" value="${data.year_group || ''}" />
+        </div>
+      </div>
+      <div class="field">
+        <label>School</label>
+        <input type="text" class="c-school" placeholder="e.g. North London Girls' School" value="${data.school || ''}" />
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label>Dietary needs <span class="optional">(optional)</span></label>
+          <input type="text" class="c-dietary" placeholder="e.g. vegetarian" value="${data.dietary_needs || ''}" />
+        </div>
+        <div class="field">
+          <label>Allergies <span class="optional">(optional)</span></label>
+          <input type="text" class="c-allergies" placeholder="e.g. nuts, dairy" value="${data.allergies || ''}" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Activities <span class="optional">(optional)</span></label>
+        <input type="text" class="c-activities" placeholder="e.g. piano Tuesdays, football Saturdays" value="${data.activities || ''}" />
+      </div>
+      <div class="field">
+        <label>Extra needs <span class="optional">(SEND, medical, other)</span></label>
+        <input type="text" class="c-extra" placeholder="e.g. ADHD, wears glasses" value="${data.extra_needs || ''}" />
+      </div>
+    `;
+    document.getElementById('children-list').appendChild(div);
+  }
+
+  function removeChild(id) {
+    document.getElementById(id)?.remove();
+  }
+
+  function getChildren() {
+    return Array.from(document.querySelectorAll('.child-card')).map(card => ({
+      name:         card.querySelector('.c-name')?.value.trim(),
+      age:          card.querySelector('.c-age')?.value,
+      year_group:   card.querySelector('.c-year')?.value.trim(),
+      school:       card.querySelector('.c-school')?.value.trim(),
+      dietary_needs:card.querySelector('.c-dietary')?.value.trim(),
+      allergies:    card.querySelector('.c-allergies')?.value.trim(),
+      activities:   card.querySelector('.c-activities')?.value.trim(),
+      extra_needs:  card.querySelector('.c-extra')?.value.trim(),
+    }));
+  }
+
+  // ── Tradespeople ──────────────────────────────────────────────────────────────
+  let tradeCount = 0;
+  function addTrade(data = {}) {
+    tradeCount++;
+    const id = `trade-${tradeCount}`;
+    const div = document.createElement('div');
+    div.className = 'trade-row';
+    div.id = id;
+    div.innerHTML = `
+      <div class="field" style="margin:0">
+        <label>Trade / role</label>
+        <input type="text" class="t-role" placeholder="e.g. Handyman" value="${data.role || ''}" />
+      </div>
+      <div class="field" style="margin:0">
+        <label>Name & contact</label>
+        <input type="text" class="t-contact" placeholder="e.g. Bob – 07700 900000" value="${data.contact || ''}" />
+      </div>
+      <button class="remove-inline" onclick="document.getElementById('${id}').remove()">✕</button>
+    `;
+    document.getElementById('trades-list').appendChild(div);
+  }
+
+  function getTrades() {
+    return Array.from(document.querySelectorAll('.trade-row')).map(row => ({
+      role:    row.querySelector('.t-role')?.value.trim(),
+      contact: row.querySelector('.t-contact')?.value.trim(),
+    })).filter(t => t.role || t.contact);
+  }
+
+  // ── Tags ──────────────────────────────────────────────────────────────────────
+  function toggleTag(label) {
+    setTimeout(() => {
+      const checked = label.querySelector('input').checked;
+      label.classList.toggle('checked', checked);
+    }, 0);
+  }
+
+  function getManageTags() {
+    return Array.from(document.querySelectorAll('#manage-tags input:checked')).map(i => i.value);
+  }
+
+  // ── File uploads ──────────────────────────────────────────────────────────────
+  const SERVER_URL = 'http://localhost:3000';
+
+  function handleFiles(input) {
+    const number = document.getElementById('whatsapp_number').value.trim();
+    Array.from(input.files).forEach(file => uploadFile(file, number));
+    input.value = '';
+  }
+
+  async function uploadFile(file, whatsappNumber) {
+    if (uploadedFiles.includes(file.name)) return;
+
+    const list = document.getElementById('file-list');
+    const size = file.size < 1024 * 1024
+      ? `${Math.round(file.size / 1024)} KB`
+      : `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
+
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.dataset.name = file.name;
+    item.innerHTML = `
+      <span>📄 ${file.name}</span>
+      <small style="color:var(--muted);white-space:nowrap">${size}</small>
+      <small class="upload-status" style="color:var(--purple);white-space:nowrap">⏳ Processing…</small>
+      <button type="button" onclick="removeFile(this)" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px;padding:0 4px">✕</button>`;
+    list.appendChild(item);
+
+    const statusEl = item.querySelector('.upload-status');
+
+    if (!whatsappNumber) {
+      statusEl.textContent = '⚠️ Enter your WhatsApp number first';
+      statusEl.style.color = 'var(--danger)';
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('whatsapp_number', whatsappNumber);
+
+      const res  = await fetch(`${SERVER_URL}/upload`, { method: 'POST', body: formData });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error || 'Upload failed');
+
+      uploadedFiles.push(file.name);
+      statusEl.textContent = `✓ ${data.events_extracted} events extracted`;
+      statusEl.style.color = 'var(--success)';
+    } catch (err) {
+      statusEl.textContent = `❌ ${err.message}`;
+      statusEl.style.color = 'var(--danger)';
+    }
+  }
+
+  function removeFile(btn) {
+    const item = btn.closest('.file-item');
+    uploadedFiles = uploadedFiles.filter(n => n !== item.dataset.name);
+    item.remove();
+  }
+
+  // ── Load existing profile ─────────────────────────────────────────────────────
+  async function loadProfile(number) {
+    const { data } = await db
+      .from('profiles')
+      .select('*')
+      .eq('whatsapp_number', number)
+      .single();
+
+    if (!data) return;
+
+    document.getElementById('mum_name').value         = data.mum_name || '';
+    document.getElementById('whatsapp_number').value  = data.whatsapp_number || '';
+    document.getElementById('postcode').value         = data.postcode || '';
+    document.getElementById('location').value         = data.location || '';
+
+    const h = data.household || {};
+    document.getElementById('cleaner_name').value = h.cleaner_name || '';
+    document.getElementById('cleaner_day').value  = h.cleaner_day  || '';
+    document.getElementById('bin_day').value      = h.bin_day      || '';
+    (h.tradespeople || []).forEach(t => addTrade(t));
+
+    const p = data.preferences || {};
+    document.getElementById('briefing_time').value       = p.briefing_time        || '07:30';
+    document.getElementById('communication_style').value = p.communication_style  || 'concise';
+    document.getElementById('extra_notes').value         = p.extra_notes          || '';
+
+    document.querySelectorAll('#manage-tags .tag-label').forEach(label => {
+      const input = label.querySelector('input');
+      if ((p.what_to_manage || []).includes(input.value)) {
+        input.checked = true;
+        label.classList.add('checked');
+      }
+    });
+
+    (data.children || []).forEach(c => addChild(c));
+  }
+
+  // ── Save ──────────────────────────────────────────────────────────────────────
+  async function saveProfile() {
+    const btn    = document.getElementById('save-btn');
+    const status = document.getElementById('status-msg');
+    status.className = 'status';
+    status.style.display = 'none';
+
+    const number = document.getElementById('whatsapp_number').value.trim();
+    if (!number) {
+      status.textContent = 'Please enter your WhatsApp number.';
+      status.className = 'status error';
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+
+    const profile = {
+      whatsapp_number: number,
+      mum_name:        document.getElementById('mum_name').value.trim(),
+      location:        document.getElementById('location').value.trim(),
+      postcode:        document.getElementById('postcode').value.trim(),
+      children:        getChildren(),
+      household: {
+        cleaner_name:  document.getElementById('cleaner_name').value.trim(),
+        cleaner_day:   document.getElementById('cleaner_day').value,
+        bin_day:       document.getElementById('bin_day').value,
+        tradespeople:  getTrades(),
+      },
+      preferences: {
+        briefing_time:        document.getElementById('briefing_time').value,
+        communication_style:  document.getElementById('communication_style').value,
+        what_to_manage:       getManageTags(),
+        extra_notes:          document.getElementById('extra_notes').value.trim(),
+        documents:            uploadedFiles,
+      },
+    };
+
+    const { error } = await db
+      .from('profiles')
+      .upsert(profile, { onConflict: 'whatsapp_number' });
+
+    btn.disabled = false;
+
+    if (error) {
+      console.error(error);
+      btn.textContent = 'Save My Profile';
+      status.textContent = '❌ Something went wrong: ' + error.message;
+      status.className = 'status error';
+    } else {
+      btn.textContent = '✓ Profile Saved';
+      btn.classList.add('saved');
+      status.innerHTML = '🎉 <strong>Your profile is saved!</strong><br><span style="font-size:14px;font-weight:400">Your Family CEO assistant now knows your family. Message the WhatsApp number to get started.</span>';
+      status.className = 'status success';
+      status.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────────────────
+  // Auto-load if phone number is in URL: profile.html?phone=+447932047812
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('phone')) loadProfile(params.get('phone'));
+
+  // Only auto-add cards when loading a saved profile (handled in loadProfile)
+</script>
+</body>
+</html>

@@ -223,39 +223,49 @@ function onboardingReprompt(step, state) {
 }
 
 async function handleOnboarding(phone, body, state) {
+  console.log(`🧭 Onboarding step ${state?.onboarding_step ?? 'new'} for ${phone}`);
+
   if (!state) {
-    await supabase.from('user_profiles').insert({ phone_number: phone, onboarding_step: 1 });
+    const { error } = await supabase.from('user_profiles').insert({ phone_number: phone, onboarding_step: 1 });
+    if (error) throw error;
     return "Welcome to Family CEO! 👋 I'm your personal family chief of staff — here to keep you organised and one step ahead.\n\nBefore we get started, I need to know a bit about your family. What's your name?";
   }
 
   const step = state.onboarding_step;
 
   switch (step) {
-    case 1:
-      await supabase.from('user_profiles')
+    case 1: {
+      const { error } = await supabase.from('user_profiles')
         .update({ name: body.trim(), onboarding_step: 2 })
         .eq('phone_number', phone);
+      if (error) throw error;
       return `Great, ${body.trim()}! How many children do you have?`;
+    }
 
-    case 2:
-      await supabase.from('user_profiles')
+    case 2: {
+      const { error } = await supabase.from('user_profiles')
         .update({ onboarding_step: 3 })
         .eq('phone_number', phone);
+      if (error) throw error;
       return 'What are their names and ages? (e.g. "Ella 8, Noah 5")';
+    }
 
     case 3: {
       const children = parseChildren(body);
-      await supabase.from('user_profiles')
+      const { error } = await supabase.from('user_profiles')
         .update({ children, onboarding_step: 4 })
         .eq('phone_number', phone);
+      if (error) throw error;
       return `Got it! What school${children.length !== 1 ? 's' : ''} do they go to?`;
     }
 
-    case 4:
-      await supabase.from('user_profiles')
+    case 4: {
+      const { error } = await supabase.from('user_profiles')
         .update({ schools: body.trim(), onboarding_step: 5 })
         .eq('phone_number', phone);
+      if (error) throw error;
       return "Almost done! What's the one thing you most want help keeping on top of?";
+    }
 
     case 5:
       await completeOnboarding(phone, { ...state, priorities: body.trim() });
@@ -269,9 +279,10 @@ async function handleOnboarding(phone, body, state) {
 async function completeOnboarding(phone, data) {
   const now = new Date().toISOString();
 
-  await supabase.from('user_profiles')
+  const { error: upErr } = await supabase.from('user_profiles')
     .update({ priorities: data.priorities, onboarded_at: now })
     .eq('phone_number', phone);
+  if (upErr) throw upErr;
 
   // Populate the profiles table so the AI flow works immediately
   const children = (data.children || []).map(c => ({
@@ -285,7 +296,7 @@ async function completeOnboarding(phone, data) {
     extra_needs:   '',
   }));
 
-  await supabase.from('profiles').upsert({
+  const { error: profErr } = await supabase.from('profiles').upsert({
     whatsapp_number: phone,
     mum_name:        data.name,
     children,
@@ -297,6 +308,7 @@ async function completeOnboarding(phone, data) {
     notes:     [],
     documents: [],
   }, { onConflict: 'whatsapp_number' });
+  if (profErr) throw profErr;
 
   console.log(`✅ Onboarding complete for ${data.name} (${phone})`);
 }
@@ -795,11 +807,13 @@ app.post('/webhook', async (req, res) => {
 
   try {
     // ── Onboarding gate ───────────────────────────────────────────────────────
-    const { data: onboarding } = await supabase
+    const { data: onboarding, error: onbError } = await supabase
       .from('user_profiles')
       .select('*')
       .eq('phone_number', phone)
-      .single();
+      .maybeSingle(); // maybeSingle: null data + null error when 0 rows (single() errors on 0 rows)
+
+    if (onbError) throw onbError;
 
     if (!onboarding?.onboarded_at) {
       if (numMedia > 0) {

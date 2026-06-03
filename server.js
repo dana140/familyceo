@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const https   = require('https');
 const twilio  = require('twilio');
+const cron    = require('node-cron');
 const Anthropic = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
 const multer  = require('multer');
@@ -15,8 +16,9 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const supabase  = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const anthropic     = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const supabase      = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const twilioClient  = new twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 // Conversation history per phone number
 const conversations = {};
@@ -311,6 +313,237 @@ function buildTwimlResponse(message) {
   return twiml.toString();
 }
 
+// ── Outbound WhatsApp sender ──────────────────────────────────────────────────
+async function sendWhatsApp(to, body) {
+  const recipient = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
+  await twilioClient.messages.create({
+    from: process.env.TWILIO_SANDBOX,
+    to:   recipient,
+    body,
+  });
+}
+
+// ── Morning briefing generator (mirrors send-briefing.js) ────────────────────
+async function generateBriefing(profile) {
+  const now      = new Date();
+  const today    = now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const todayISO = now.toISOString().split('T')[0];
+  const p = profile.preferences || {};
+  const h = profile.household   || {};
+
+  const children = (profile.children || []).map(c =>
+    `- ${c.name}, age ${c.age}, ${c.year_group} at ${c.school}` +
+    (c.activities    ? `. Activities: ${c.activities}`  : '') +
+    (c.allergies     ? `. Allergies: ${c.allergies}`    : '') +
+    (c.dietary_needs ? `. Dietary: ${c.dietary_needs}`  : '') +
+    (c.extra_needs   ? `. Notes: ${c.extra_needs}`      : '')
+  ).join('\n');
+
+  const trades = (h.tradespeople || []).map(t => `- ${t.role}: ${t.contact}`).join('\n');
+
+  const savedNotes = (profile.notes || [])
+    .filter(n => {
+      if (!n.date) return false;
+      const daysAhead = (new Date(n.date) - now) / (1000 * 60 * 60 * 24);
+      return daysAhead >= 0 && daysAhead <= 7;
+    })
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  const upcomingEvents = (profile.documents || [])
+    .flatMap(doc => (doc.events || []).map(e => ({ ...e, source: doc.filename })))
+    .filter(e => {
+      const daysAhead = (new Date(e.date) - now) / (1000 * 60 * 60 * 24);
+      return daysAhead >= 0 && daysAhead <= 7;
+    })
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  const notesSection = savedNotes.length > 0
+    ? `\nSAVED REMINDERS THIS WEEK:\n${savedNotes.map(n => `- ${n.date}: ${n.title}`).join('\n')}`
+    : '';
+  const calendarSection = upcomingEvents.length > 0
+    ? `\nCALENDAR EVENTS THIS WEEK:\n${upcomingEvents.map(e => `- ${e.date}: ${e.title}`).join('\n')}`
+    : '';
+
+  const response = await anthropic.messages.create({
+    model:      'claude-sonnet-4-6',
+    max_tokens: 400,
+    messages: [{
+      role: 'user',
+      content: `Today is ${today} (${todayISO}).
+
+━━━ MODE: MORNING BRIEFING ━━━
+Concise daily digest for ${profile.mum_name} — she reads it in 30 seconds.
+
+FAMILY PROFILE:
+Children:\n${children || 'None saved'}
+Household:
+- Cleaner: ${h.cleaner_name || 'not set'}${h.cleaner_day ? `, comes on ${h.cleaner_day}` : ''}
+- Bin day: ${h.bin_day || 'not set'}
+${trades ? `Tradespeople:\n${trades}` : ''}
+${calendarSection}${notesSection}
+Extra notes: ${p.extra_notes || 'none'}
+
+RULES:
+- Start with "Good morning ${profile.mum_name} 👋"
+- 3–5 numbered items with relevant emoji
+- Focus on TODAY and the next 2 days only
+- Draw from: children's activities, school day, bin day, cleaner day, imminent events
+- End with "Reply with a number to action any of these."
+- Warm but efficient — every word must count`,
+    }],
+  });
+
+  return response.content[0].text;
+}
+
+// ── Reminder content generator ────────────────────────────────────────────────
+async function generateReminderContent(reminder, profile) {
+  const today = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+  const response = await anthropic.messages.create({
+    model:      'claude-sonnet-4-6',
+    max_tokens: 300,
+    system:     buildSystemPrompt(profile),
+    messages: [{
+      role: 'user',
+      content: `Today is ${today}. Generate a short WhatsApp notification for: ${reminder.context}. This is a proactive reminder, not a reply — keep it natural and brief.`,
+    }],
+  });
+  return response.content[0].text.trim();
+}
+
+// ── Reminder extractor ────────────────────────────────────────────────────────
+async function extractReminder(message, profile) {
+  const now    = new Date();
+  const today  = now.toISOString().split('T')[0];
+  const dayName = now.toLocaleDateString('en-GB', { weekday: 'long' });
+  // Compute this coming Sunday for "this week" prompts
+  const daysToSun = (7 - now.getDay()) % 7 || 7;
+  const thisSunday = new Date(now);
+  thisSunday.setDate(now.getDate() + daysToSun);
+  const thisSundayISO = thisSunday.toISOString().split('T')[0];
+
+  const result = await anthropic.messages.create({
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 500,
+    messages: [{
+      role: 'user',
+      content: `Today is ${today} (${dayName}). This Sunday is ${thisSundayISO}.
+User message: "${message}"
+
+Does this ask to be reminded or sent something at a specific time?
+Look for: "remind me", "send me", "every day", "at Xpm/am", "each morning", "this week", etc.
+
+Return ONLY valid JSON:
+{
+  "has_reminder": true or false,
+  "reminders": [
+    {
+      "context": "what to generate/send — be specific, e.g. 'a short maths exercise for Ellie about Time'",
+      "schedule_time": "HH:MM in 24h",
+      "frequency": "once | daily | weekdays | weekly",
+      "start_date": "YYYY-MM-DD",
+      "end_date": "YYYY-MM-DD or null"
+    }
+  ]
+}
+Resolve all relative dates using today's date.
+"This week" means start today, end ${thisSundayISO}.
+If no end date implied: end_date is null.
+If no reminder found: {"has_reminder": false, "reminders": []}`,
+    }],
+  });
+
+  let parsed;
+  try {
+    const raw     = result.content[0].text.trim();
+    const jsonStr = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    return;
+  }
+
+  if (!parsed.has_reminder || !parsed.reminders.length) return;
+
+  for (const r of parsed.reminders) {
+    const { error } = await supabase.from('reminders').insert({
+      whatsapp_number: profile.whatsapp_number,
+      context:         r.context,
+      type:            'reminder',
+      schedule_time:   r.schedule_time,
+      frequency:       r.frequency || 'once',
+      start_date:      r.start_date || today,
+      end_date:        r.end_date   || null,
+      active:          true,
+    });
+    if (!error) console.log(`⏰ Reminder saved: "${r.context}" at ${r.schedule_time} (${r.frequency})`);
+  }
+}
+
+// ── Scheduler ─────────────────────────────────────────────────────────────────
+async function runScheduler() {
+  const now = new Date();
+  // All time comparisons in Europe/London so BST/GMT is handled correctly
+  const timeStr  = now.toLocaleTimeString('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false });
+  const todayISO = now.toLocaleDateString('en-CA',  { timeZone: 'Europe/London' }); // en-CA → YYYY-MM-DD
+  // Construct a Date whose .getDay() reflects London local time
+  const londonDate = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
+  const dayOfWeek  = londonDate.getDay(); // 0=Sun … 6=Sat
+
+  // ── 1. User reminders ──────────────────────────────────────────────────────
+  const { data: reminders } = await supabase
+    .from('reminders')
+    .select('*')
+    .eq('active', true)
+    .eq('type', 'reminder')
+    .eq('schedule_time', timeStr)
+    .lte('start_date', todayISO);
+
+  for (const r of (reminders || [])) {
+    if (r.end_date && r.end_date < todayISO) {
+      await supabase.from('reminders').update({ active: false }).eq('id', r.id);
+      continue;
+    }
+    if (r.frequency === 'weekdays' && (dayOfWeek === 0 || dayOfWeek === 6)) continue;
+    if (r.last_sent_at && new Date(r.last_sent_at).toLocaleDateString('en-CA', { timeZone: 'Europe/London' }) === todayISO) continue;
+
+    try {
+      const { data: profileRow } = await supabase
+        .from('profiles').select('*').eq('whatsapp_number', r.whatsapp_number).single();
+      const content = await generateReminderContent(r, profileRow);
+      await sendWhatsApp(r.whatsapp_number, content);
+      await supabase.from('reminders').update({
+        last_sent_at: now.toISOString(),
+        ...(r.frequency === 'once' ? { active: false } : {}),
+      }).eq('id', r.id);
+      console.log(`⏰ Reminder sent to ${profileRow?.mum_name || r.whatsapp_number}: ${r.context}`);
+    } catch (e) {
+      console.error(`⚠️  Reminder failed for ${r.whatsapp_number}:`, e.message);
+    }
+  }
+
+  // ── 2. Morning briefings ───────────────────────────────────────────────────
+  const { data: profiles } = await supabase.from('profiles').select('*');
+
+  for (const profile of (profiles || [])) {
+    const briefingTime = (profile.preferences || {}).briefing_time || '07:30';
+    if (briefingTime !== timeStr) continue;
+
+    const lastBriefingDate = (profile.preferences || {}).last_briefing_date;
+    if (lastBriefingDate === todayISO) continue;
+
+    try {
+      const briefing = await generateBriefing(profile);
+      await sendWhatsApp(profile.whatsapp_number, briefing);
+      await supabase.from('profiles').update({
+        preferences: { ...profile.preferences, last_briefing_date: todayISO },
+      }).eq('whatsapp_number', profile.whatsapp_number);
+      console.log(`🌅 Morning briefing sent to ${profile.mum_name}`);
+    } catch (e) {
+      console.error(`⚠️  Briefing failed for ${profile.mum_name}:`, e.message);
+    }
+  }
+}
+
 // ── Twilio media downloader ───────────────────────────────────────────────────
 function downloadTwilioMedia(mediaUrl) {
   return new Promise((resolve, reject) => {
@@ -481,9 +714,10 @@ app.post('/webhook', async (req, res) => {
       console.log(`⚠️  No profile found for ${from} — using generic prompt`);
     }
 
-    // Fire extraction in background — never let it delay the Twilio response
+    // Fire extraction + reminder detection in background — never delay the Twilio response
     if (profile) {
       extractAndSave(body, profile).catch(e => console.error('⚠️ Extract error:', e.message));
+      extractReminder(body, profile).catch(e => console.error('⚠️ Reminder extract error:', e.message));
     }
 
     const reply = await getClaudeReply(from, body, profile);
@@ -501,9 +735,15 @@ app.post('/webhook', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'Family CEO webhook' }));
 
+// ── Scheduler: check every minute for due reminders and briefings ─────────────
+cron.schedule('* * * * *', () => {
+  runScheduler().catch(e => console.error('⚠️  Scheduler error:', e.message));
+}, { timezone: 'Europe/London' });
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Family CEO webhook server running on port ${PORT}`);
   console.log(`   POST http://localhost:${PORT}/webhook`);
   console.log(`   POST http://localhost:${PORT}/upload`);
+  console.log(`   ⏰ Scheduler running — checking reminders every minute`);
 });

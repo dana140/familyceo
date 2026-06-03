@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node *)",
+      "Bash(npm install *)",
+      "Bash(sudo npm install express)",
+      "Bash(curl -s http://localhost:3000/health)",
+      "Bash(curl *)",
+      "Bash(kill %1)",
+      "Bash(pkill -f \"node server.js\")",
+      "Bash(ngrok http *)",
+      "Bash(python3 -c \"import sys,json; t=json.load\\(sys.stdin\\)['tunnels']; print\\(t[0]['public_url']\\)\")",
+      "Bash(/usr/local/bin/ngrok http *)",
+      "Bash(python3 -m json.tool)",
+      "Bash(kill -9 15439)",
+      "Bash(npm uninstall *)",
+      "Bash(xargs kill -9)",
+      "Bash(echo \"PID=$!\")",
+      "Bash(git -C /Users/danalevy/familyceo status)",
+      "Bash(git -C /Users/danalevy/familyceo diff)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git -C /Users/danalevy/familyceo add .gitignore package.json package-lock.json server.js schema.sql profile.html send-briefing.js)",
+      "Bash(git *)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d['version']\\)\")"
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+const twilio = require('twilio');
+
+const accountSid = 'YOUR_ACCOUNT_SID';
+const authToken = 'YOUR_AUTH_TOKEN';
+const client = twilio(accountSid, authToken);
+
+const yourWhatsApp = 'whatsapp:+44YOURMOBILENUMBER';
+const twilioSandbox = 'whatsapp:+14155238886';
+
+const morningBriefing = `Good morning Dana 👋
+
+Here's your Family CEO briefing for today:
+
+1. 🎵 Katseye concert — the kids have asked three times. Want me to find tickets?
+2. 🎹 Ellie's piano lesson is today — song request not sent yet. Shall I message the teacher?
+3. 🏫 School starts Monday — have you checked the uniforms?
+4. 🥗 BBQ today at 1pm — you're bringing a salad. Missing: cucumber and feta.
+5. 🔧 Back door lock — shall I message the handyman?
+
+Reply with a number to action any of these.`;
+
+client.messages.create({
+  from: twilioSandbox,
+  to: yourWhatsApp,
+  body: morningBriefing
+}).then(msg => {
+  console.log('✅ Morning briefing sent! Message ID:', msg.sid);
+}).catch(err => {
+  console.error('❌ Error:', err.message);
+}
+cd ~/familyceo
+claude
+

@@ -26,11 +26,13 @@ const conversations = {};
 
 // ── Phone normaliser ──────────────────────────────────────────────────────────
 function normalisePhone(raw) {
-  return raw
+  let n = (raw || '')
     .replace('whatsapp:', '')
-    .trim()
-    .replace(/^\s/, '+')
-    .replace(/^00/, '+');
+    .replace(/\s+/g, '')          // strip all spaces
+    .replace(/^00/, '+')          // 00XX → +XX
+    .replace(/^0(\d{10})$/, '+44$1'); // 07XXXXXXXXXX → +447XXXXXXXXXX (UK)
+  if (!n.startsWith('+')) n = `+${n}`;
+  return `whatsapp:${n}`;
 }
 
 // ── Profile loader ────────────────────────────────────────────────────────────

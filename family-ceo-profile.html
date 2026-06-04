@@ -1,0 +1,1398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Family CEO — Command Centre</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #faf9f7;
+  --white: #ffffff;
+  --surface: #f4f2ee;
+  --border: #e8e4de;
+  --border-focus: #b8a990;
+  --ink: #1a1814;
+  --ink-mid: #6b6560;
+  --ink-light: #a09890;
+  --accent: #8b6914;
+  --accent-light: #f7f0e4;
+  --accent-mid: rgba(139,105,20,0.12);
+  --green: #3a7d58;
+  --green-light: #eef6f1;
+  --red: #c0392b;
+  --red-light: #fdf1f0;
+  --shadow-sm: 0 1px 3px rgba(26,24,20,0.06), 0 1px 2px rgba(26,24,20,0.04);
+  --shadow-md: 0 4px 16px rgba(26,24,20,0.08), 0 2px 6px rgba(26,24,20,0.04);
+  --radius: 6px;
+  --radius-lg: 10px;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'Jost', sans-serif;
+  font-weight: 300;
+  min-height: 100vh;
+}
+
+/* Layout */
+.shell {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+}
+
+/* Sidebar */
+.sidebar {
+  background: var(--white);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.logo-area {
+  padding: 36px 28px 28px;
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 26px;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+  line-height: 1;
+}
+
+.logo em {
+  font-style: italic;
+  color: var(--accent);
+}
+
+.logo-sub {
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-light);
+  margin-top: 6px;
+  font-weight: 400;
+}
+
+.nav {
+  padding: 24px 16px;
+  flex: 1;
+}
+
+.nav-section {
+  margin-bottom: 32px;
+}
+
+.nav-section-label {
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-light);
+  padding: 0 12px;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-size: 13px;
+  color: var(--ink-mid);
+  font-weight: 400;
+}
+
+.nav-item:hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.nav-item.active {
+  background: var(--accent-light);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.nav-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.nav-item.active .nav-dot { background: var(--accent); }
+.nav-item.done .nav-dot { background: var(--green); }
+
+.progress-area {
+  padding: 20px 28px 28px;
+  border-top: 1px solid var(--border);
+}
+
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--ink-light);
+  margin-bottom: 8px;
+  letter-spacing: 0.04em;
+}
+
+.progress-bar {
+  height: 2px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #c49a28);
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.5s ease;
+}
+
+/* Main */
+.main {
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.topbar {
+  padding: 20px 52px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  background: rgba(250,249,247,0.95);
+  backdrop-filter: blur(8px);
+  z-index: 10;
+}
+
+.page-title {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 24px;
+  font-weight: 400;
+  color: var(--ink);
+  letter-spacing: 0.01em;
+}
+
+.page-title em {
+  font-style: italic;
+  color: var(--accent);
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.save-status {
+  font-size: 11px;
+  color: var(--ink-light);
+  letter-spacing: 0.04em;
+}
+
+.save-btn {
+  background: var(--ink);
+  color: var(--white);
+  border: none;
+  padding: 10px 24px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  font-family: 'Jost', sans-serif;
+  transition: all 0.15s;
+}
+
+.save-btn:hover { background: #2d2a25; }
+
+/* Content */
+.content {
+  padding: 48px 52px 100px;
+  max-width: 960px;
+}
+
+.section {
+  margin-bottom: 64px;
+  animation: fadeUp 0.35s ease both;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.section:nth-child(2) { animation-delay: 0.05s; }
+.section:nth-child(3) { animation-delay: 0.1s; }
+.section:nth-child(4) { animation-delay: 0.15s; }
+.section:nth-child(5) { animation-delay: 0.2s; }
+
+.section-header {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-bottom: 28px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.section-num {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 13px;
+  color: var(--accent);
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  flex-shrink: 0;
+}
+
+.section-title {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 26px;
+  font-weight: 400;
+  color: var(--ink);
+  letter-spacing: 0.01em;
+}
+
+.section-desc {
+  font-size: 11px;
+  color: var(--ink-light);
+  margin-left: auto;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+/* Fields */
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.field-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+.field-grid.full { grid-template-columns: 1fr; }
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.field label {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-mid);
+  font-weight: 500;
+}
+
+.field input,
+.field select,
+.field textarea {
+  background: var(--white);
+  border: 1px solid var(--border);
+  color: var(--ink);
+  font-family: 'Jost', sans-serif;
+  font-size: 13px;
+  font-weight: 300;
+  padding: 11px 14px;
+  border-radius: var(--radius);
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  width: 100%;
+  box-shadow: var(--shadow-sm);
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(139,105,20,0.08);
+}
+
+.field input::placeholder,
+.field textarea::placeholder { color: var(--ink-light); }
+
+.field textarea {
+  resize: vertical;
+  min-height: 80px;
+  line-height: 1.6;
+}
+
+/* Tag input */
+.tag-input-wrap {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 7px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-height: 44px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  cursor: text;
+  box-shadow: var(--shadow-sm);
+}
+
+.tag-input-wrap:focus-within {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(139,105,20,0.08);
+}
+
+.tag {
+  background: var(--accent-light);
+  border: 1px solid rgba(139,105,20,0.2);
+  color: var(--accent);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+
+.tag-remove {
+  cursor: pointer;
+  opacity: 0.5;
+  font-size: 14px;
+  line-height: 1;
+  transition: opacity 0.1s;
+}
+
+.tag-remove:hover { opacity: 1; }
+
+.tag-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--ink);
+  font-family: 'Jost', sans-serif;
+  font-size: 13px;
+  font-weight: 300;
+  min-width: 100px;
+  flex: 1;
+}
+
+.tag-input::placeholder { color: var(--ink-light); }
+
+/* Child cards */
+.child-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.child-card {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+
+.child-card:hover { box-shadow: var(--shadow-md); }
+
+.child-card-header {
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid transparent;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+
+.child-card.open .child-card-header {
+  border-bottom-color: var(--border);
+  background: var(--bg);
+}
+
+.child-card-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.child-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent-light);
+  border: 1px solid rgba(139,105,20,0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 16px;
+  color: var(--accent);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.child-name-display {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+  letter-spacing: 0.01em;
+}
+
+.child-age-display {
+  font-size: 11px;
+  color: var(--ink-light);
+  margin-top: 1px;
+}
+
+.child-card-toggle {
+  font-size: 16px;
+  color: var(--ink-light);
+  transition: transform 0.2s;
+  line-height: 1;
+}
+
+.child-card.open .child-card-toggle { transform: rotate(180deg); }
+
+.child-card-body {
+  padding: 24px 20px 20px;
+  display: none;
+}
+
+.child-card.open .child-card-body {
+  display: block;
+  animation: fadeUp 0.2s ease;
+}
+
+.remove-child {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--ink-light);
+  font-size: 11px;
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: 'Jost', sans-serif;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  transition: all 0.15s;
+  margin-top: 16px;
+}
+
+.remove-child:hover {
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--red-light);
+}
+
+.add-child-btn {
+  background: transparent;
+  border: 1px dashed var(--border-focus);
+  color: var(--ink-mid);
+  width: 100%;
+  padding: 14px;
+  border-radius: var(--radius-lg);
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  cursor: pointer;
+  font-family: 'Jost', sans-serif;
+  transition: all 0.15s;
+  margin-top: 12px;
+  font-weight: 500;
+}
+
+.add-child-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+/* Tradespeople */
+.trade-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.trade-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 40px;
+  gap: 10px;
+  align-items: end;
+}
+
+.trade-remove {
+  background: var(--white);
+  border: 1px solid var(--border);
+  color: var(--ink-light);
+  width: 40px;
+  height: 42px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  box-shadow: var(--shadow-sm);
+  flex-shrink: 0;
+  font-family: inherit;
+}
+
+.trade-remove:hover {
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--red-light);
+}
+
+.add-row-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  font-family: 'Jost', sans-serif;
+  padding: 10px 0;
+  text-align: left;
+  font-weight: 500;
+  transition: opacity 0.15s;
+}
+
+.add-row-btn:hover { opacity: 0.65; }
+
+/* Upload zone */
+.upload-zone {
+  border: 1.5px dashed var(--border-focus);
+  border-radius: var(--radius-lg);
+  padding: 48px 40px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+  background: var(--white);
+  box-shadow: var(--shadow-sm);
+}
+
+.upload-zone:hover,
+.upload-zone.dragover {
+  border-color: var(--accent);
+  background: var(--accent-light);
+}
+
+.upload-zone input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+
+.upload-icon {
+  font-size: 28px;
+  margin-bottom: 14px;
+  opacity: 0.35;
+}
+
+.upload-title {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 20px;
+  font-weight: 400;
+  margin-bottom: 8px;
+  color: var(--ink);
+}
+
+.upload-desc {
+  font-size: 12px;
+  color: var(--ink-light);
+  line-height: 1.7;
+}
+
+.uploaded-files {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.uploaded-file {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 11px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: var(--shadow-sm);
+  animation: fadeUp 0.2s ease;
+}
+
+.uploaded-file-name {
+  font-size: 12px;
+  color: var(--ink-mid);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-icon {
+  font-size: 14px;
+  opacity: 0.6;
+}
+
+.file-status {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-light);
+  font-weight: 500;
+}
+
+.file-status.ready { color: var(--green); }
+
+/* Time picker */
+.time-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.time-option {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 10px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s;
+  box-shadow: var(--shadow-sm);
+}
+
+.time-option:hover { border-color: var(--border-focus); }
+
+.time-option.selected {
+  background: var(--accent-light);
+  border-color: rgba(139,105,20,0.35);
+}
+
+.time-option .time {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 22px;
+  font-weight: 400;
+  color: var(--ink);
+  display: block;
+  margin-bottom: 3px;
+}
+
+.time-option.selected .time { color: var(--accent); }
+
+.time-option .time-label {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-light);
+}
+
+.time-option.selected .time-label { color: var(--accent); opacity: 0.7; }
+
+/* Check grid */
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.check-item {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-size: 12px;
+  color: var(--ink-mid);
+  box-shadow: var(--shadow-sm);
+  font-weight: 400;
+}
+
+.check-item:hover { border-color: var(--border-focus); color: var(--ink); }
+
+.check-item.checked {
+  background: var(--accent-light);
+  border-color: rgba(139,105,20,0.3);
+  color: var(--accent);
+}
+
+.check-box {
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--border-focus);
+  border-radius: 3px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  transition: all 0.15s;
+  color: transparent;
+}
+
+.check-item.checked .check-box {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--white);
+}
+
+.field-gap { margin-bottom: 16px; }
+
+/* Club rows (per child) */
+.club-rows { display: flex; flex-direction: column; gap: 10px; margin-bottom: 8px; }
+.club-row {
+  display: grid;
+  grid-template-columns: 150px 1fr 120px 40px;
+  gap: 10px;
+  align-items: end;
+}
+@media (max-width: 800px) {
+  .club-row { grid-template-columns: 1fr 1fr; }
+  .club-row .trade-remove { display: none; }
+}
+
+/* Intro note */
+.intro-note {
+  background: var(--accent-light);
+  border: 1px solid rgba(139,105,20,0.15);
+  border-radius: var(--radius-lg);
+  padding: 18px 22px;
+  margin-bottom: 32px;
+  font-size: 13px;
+  color: var(--ink-mid);
+  line-height: 1.7;
+}
+
+.intro-note strong {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* Responsive */
+@media (max-width: 800px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar { display: none; }
+  .content { padding: 28px 20px 80px; }
+  .topbar { padding: 16px 20px; }
+  .field-grid, .field-grid.three { grid-template-columns: 1fr; }
+  .time-grid { grid-template-columns: repeat(2, 1fr); }
+  .check-grid { grid-template-columns: repeat(2, 1fr); }
+  .trade-row { grid-template-columns: 1fr 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="logo-area">
+      <div class="logo">Family <em>CEO</em></div>
+      <div class="logo-sub">Your Command Centre</div>
+    </div>
+
+    <nav class="nav">
+      <div class="nav-section">
+        <div class="nav-section-label">Your Profile</div>
+        <div class="nav-item active" onclick="goTo('s1', 0)">
+          <div class="nav-dot"></div> About You
+        </div>
+        <div class="nav-item" onclick="goTo('s2', 1)">
+          <div class="nav-dot"></div> Your Children
+        </div>
+        <div class="nav-item" onclick="goTo('s3', 2)">
+          <div class="nav-dot"></div> Your Household
+        </div>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-label">Intelligence</div>
+        <div class="nav-item" onclick="goTo('s4', 3)">
+          <div class="nav-dot"></div> Upload Documents
+        </div>
+        <div class="nav-item" onclick="goTo('s5', 4)">
+          <div class="nav-dot"></div> Your Preferences
+        </div>
+      </div>
+    </nav>
+
+    <div class="progress-area">
+      <div class="progress-label">
+        <span>Profile complete</span>
+        <span id="progressPct">0%</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <div class="topbar">
+      <div class="page-title">Your <em>Command Centre</em></div>
+      <div class="topbar-right">
+        <span class="save-status" id="saveStatus">Unsaved changes</span>
+        <button class="save-btn" onclick="saveProfile()">Save Profile</button>
+      </div>
+    </div>
+
+    <div class="content">
+
+      <div class="intro-note">
+        <strong>Welcome to your Command Centre.</strong> The more you tell us, the smarter your Chief of Staff becomes. This takes about 10 minutes — and it's the last time you'll have to think about most of this.
+      </div>
+
+      <!-- Section 1: About You -->
+      <div class="section" id="s1">
+        <div class="section-header">
+          <span class="section-num">01</span>
+          <span class="section-title">About You</span>
+          <span class="section-desc">The CEO's profile</span>
+        </div>
+
+        <div class="field-grid">
+          <div class="field">
+            <label>First Name</label>
+            <input type="text" placeholder="Your name" id="ceoName" oninput="updateProgress()">
+          </div>
+          <div class="field">
+            <label>Last Name</label>
+            <input type="text" placeholder="Your surname">
+          </div>
+        </div>
+
+        <div class="field-grid">
+          <div class="field">
+            <label>Mobile (WhatsApp number)</label>
+            <input type="tel" placeholder="+44 7700 000000" id="ceoPhone" oninput="updateProgress()">
+          </div>
+          <div class="field">
+            <label>Area / Neighbourhood</label>
+            <input type="text" placeholder="e.g. North London">
+          </div>
+        </div>
+
+        <div class="field-grid field-gap">
+          <div class="field">
+            <label>Postcode</label>
+            <input type="text" placeholder="For finding local services">
+          </div>
+          <div class="field">
+            <label>Timezone</label>
+            <select>
+              <option>Europe/London (GMT+1)</option>
+              <option>Europe/Paris (GMT+2)</option>
+              <option>America/New_York (GMT-4)</option>
+              <option>America/Los_Angeles (GMT-7)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field-grid full field-gap">
+          <div class="field">
+            <label>Anything your Chief of Staff should know about you</label>
+            <textarea placeholder="e.g. We keep kosher. I work part-time on Tuesdays and Thursdays. My husband handles the finances..."></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 2: Children -->
+      <div class="section" id="s2">
+        <div class="section-header">
+          <span class="section-num">02</span>
+          <span class="section-title">Your Children</span>
+          <span class="section-desc">Each child, fully briefed</span>
+        </div>
+
+        <div class="child-cards" id="childCards"></div>
+        <button class="add-child-btn" onclick="addChild()">+ Add a Child</button>
+      </div>
+
+      <!-- Section 3: Household -->
+      <div class="section" id="s3">
+        <div class="section-header">
+          <span class="section-num">03</span>
+          <span class="section-title">Your Household</span>
+          <span class="section-desc">The infrastructure layer</span>
+        </div>
+
+        <div class="field-grid field-gap">
+          <div class="field">
+            <label>Cleaner name / company</label>
+            <input type="text" placeholder="e.g. Maria, or CleanCo">
+          </div>
+          <div class="field">
+            <label>Cleaner frequency</label>
+            <select>
+              <option value="">Select...</option>
+              <option>Weekly</option>
+              <option>Fortnightly</option>
+              <option>Monthly</option>
+              <option>Ad hoc</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field-grid field-gap">
+          <div class="field">
+            <label>Bin collection day</label>
+            <select>
+              <option value="">Select day...</option>
+              <option>Monday</option><option>Tuesday</option><option>Wednesday</option>
+              <option>Thursday</option><option>Friday</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Recycling day (if different)</label>
+            <select>
+              <option value="">Select day...</option>
+              <option>Monday</option><option>Tuesday</option><option>Wednesday</option>
+              <option>Thursday</option><option>Friday</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field-gap">
+          <div class="field" style="margin-bottom: 10px;">
+            <label>Your Tradespeople</label>
+          </div>
+          <div class="trade-rows" id="tradeRows">
+            <div class="trade-row">
+              <div class="field"><label>Role</label><input type="text" placeholder="e.g. Plumber"></div>
+              <div class="field"><label>Name / Company</label><input type="text" placeholder="e.g. Dave's Plumbing"></div>
+              <div class="field"><label>Contact</label><input type="text" placeholder="Phone or WhatsApp"></div>
+              <button class="trade-remove" onclick="removeRow(this)">×</button>
+            </div>
+          </div>
+          <button class="add-row-btn" onclick="addTradeRow()">+ Add tradesperson</button>
+        </div>
+
+        <div class="field-grid field-gap">
+          <div class="field">
+            <label>Grocery delivery provider</label>
+            <select>
+              <option value="">Select...</option>
+              <option>Ocado</option><option>Waitrose</option><option>Sainsbury's</option>
+              <option>Tesco</option><option>M&S</option><option>Other / none</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Usual grocery day</label>
+            <select>
+              <option value="">Select...</option>
+              <option>Monday</option><option>Tuesday</option><option>Wednesday</option>
+              <option>Thursday</option><option>Friday</option><option>Weekend</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field field-gap">
+          <label>Anything else about your household</label>
+          <textarea placeholder="e.g. We have a dog. The boiler is due a service in March. The back gate code is 1234. We have a cleaner on Fridays and she needs access..."></textarea>
+        </div>
+      </div>
+
+      <!-- Section 4: Documents -->
+      <div class="section" id="s4">
+        <div class="section-header">
+          <span class="section-num">04</span>
+          <span class="section-title">Upload Documents</span>
+          <span class="section-desc">Let your Chief of Staff read the paperwork</span>
+        </div>
+
+        <p style="font-size: 13px; color: var(--ink-mid); line-height: 1.8; margin-bottom: 24px;">Upload your school calendars, term dates, activity schedules, medical letters, warranty documents — anything with dates or deadlines. Your Chief of Staff will read them, extract what matters, and add it to your intelligence layer automatically. No manual entry required.</p>
+
+        <div class="upload-zone" id="uploadZone">
+          <input type="file" multiple accept=".pdf,.doc,.docx,.jpg,.png" onchange="handleFiles(this.files)">
+          <div class="upload-icon">↑</div>
+          <div class="upload-title">Drop documents here to upload</div>
+          <div class="upload-desc">
+            School calendars · Term dates · Activity timetables<br>
+            Medical letters · Warranties · Insurance documents<br><br>
+            PDF, Word, or image files accepted
+          </div>
+        </div>
+
+        <div class="uploaded-files" id="uploadedFiles"></div>
+      </div>
+
+      <!-- Section 5: Preferences -->
+      <div class="section" id="s5">
+        <div class="section-header">
+          <span class="section-num">05</span>
+          <span class="section-title">Your Preferences</span>
+          <span class="section-desc">How your Chief of Staff works</span>
+        </div>
+
+        <div class="field-gap">
+          <div class="field" style="margin-bottom: 14px;">
+            <label>Morning briefing time — when would you like your daily update?</label>
+          </div>
+          <div class="time-grid">
+            <div class="time-option" onclick="selectTime(this)">
+              <span class="time">6:30</span>
+              <span class="time-label">Early bird</span>
+            </div>
+            <div class="time-option selected" onclick="selectTime(this)">
+              <span class="time">7:30</span>
+              <span class="time-label">School run</span>
+            </div>
+            <div class="time-option" onclick="selectTime(this)">
+              <span class="time">8:30</span>
+              <span class="time-label">After drop-off</span>
+            </div>
+            <div class="time-option" onclick="selectTime(this)">
+              <span class="time">9:00</span>
+              <span class="time-label">Working hours</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="field-gap" style="margin-top: 32px;">
+          <div class="field" style="margin-bottom: 14px;">
+            <label>What should your Chief of Staff manage?</label>
+          </div>
+          <div class="check-grid">
+            <div class="check-item checked" onclick="toggleCheck(this)">
+              <div class="check-box">✓</div> School admin
+            </div>
+            <div class="check-item checked" onclick="toggleCheck(this)">
+              <div class="check-box">✓</div> Medical appointments
+            </div>
+            <div class="check-item checked" onclick="toggleCheck(this)">
+              <div class="check-box">✓</div> Birthday planning
+            </div>
+            <div class="check-item" onclick="toggleCheck(this)">
+              <div class="check-box"></div> Grocery planning
+            </div>
+            <div class="check-item" onclick="toggleCheck(this)">
+              <div class="check-box"></div> Tradespeople
+            </div>
+            <div class="check-item checked" onclick="toggleCheck(this)">
+              <div class="check-box">✓</div> Activity bookings
+            </div>
+            <div class="check-item" onclick="toggleCheck(this)">
+              <div class="check-box"></div> Insurance renewals
+            </div>
+            <div class="check-item" onclick="toggleCheck(this)">
+              <div class="check-box"></div> Warranty tracking
+            </div>
+            <div class="check-item checked" onclick="toggleCheck(this)">
+              <div class="check-box">✓</div> WhatsApp monitoring
+            </div>
+          </div>
+        </div>
+
+        <div class="field-grid" style="margin-top: 28px;">
+          <div class="field">
+            <label>Communication style</label>
+            <select>
+              <option>Direct and brief — just the essentials</option>
+              <option>Friendly and warm — a bit of personality</option>
+              <option>Detailed — I want full context</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Morning briefing length</label>
+            <select>
+              <option>3 items maximum</option>
+              <option>5 items maximum</option>
+              <option>Everything that needs attention</option>
+            </select>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script>
+let childCount = 0;
+
+function addChild(data = {}) {
+  childCount++;
+  const id = childCount;
+  const name = data.name || '';
+  const initial = name ? name[0].toUpperCase() : '?';
+
+  const card = document.createElement('div');
+  card.className = 'child-card open';
+  card.id = `child-${id}`;
+  card.innerHTML = `
+    <div class="child-card-header" onclick="toggleChild(${id})">
+      <div class="child-card-title">
+        <div class="child-avatar" id="avatar-${id}">${initial}</div>
+        <div>
+          <div class="child-name-display" id="name-display-${id}">${name || 'New Child'}</div>
+          <div class="child-age-display" id="age-display-${id}">Add details below</div>
+        </div>
+      </div>
+      <div class="child-card-toggle">⌄</div>
+    </div>
+    <div class="child-card-body">
+      <div class="field-grid three" style="margin-bottom:16px">
+        <div class="field">
+          <label>First Name</label>
+          <input type="text" placeholder="Name" value="${name}"
+            oninput="updateChildName(${id}, this.value)" id="child-name-${id}">
+        </div>
+        <div class="field">
+          <label>Date of Birth</label>
+          <input type="date" oninput="updateChildAge(${id}, this.value)">
+        </div>
+        <div class="field">
+          <label>Year Group</label>
+          <select>
+            <option value="">Select...</option>
+            <option>Nursery</option><option>Reception</option>
+            <option>Year 1</option><option>Year 2</option><option>Year 3</option>
+            <option>Year 4</option><option>Year 5</option><option>Year 6</option>
+            <option>Year 7</option><option>Year 8</option><option>Year 9</option>
+            <option>Year 10</option><option>Year 11</option><option>Year 12</option><option>Year 13</option>
+          </select>
+        </div>
+      </div>
+      <div class="field-grid full" style="margin-bottom:16px">
+        <div class="field">
+          <label>School Name</label>
+          <input type="text" placeholder="e.g. Kerem School">
+        </div>
+      </div>
+      <div class="field-grid" style="margin-bottom:16px">
+        <div class="field">
+          <label>Dietary Requirements</label>
+          <div class="tag-input-wrap" onclick="this.querySelector('input').focus()">
+            <input class="tag-input" placeholder="Type & press Enter..." onkeydown="addTag(event,this)">
+          </div>
+        </div>
+        <div class="field">
+          <label>Allergies</label>
+          <div class="tag-input-wrap" onclick="this.querySelector('input').focus()">
+            <input class="tag-input" placeholder="Type & press Enter..." onkeydown="addTag(event,this)">
+          </div>
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:16px">
+        <label>Activities &amp; Clubs</label>
+        <div class="club-rows" id="clubs-${id}"></div>
+        <button type="button" class="add-row-btn" onclick="addClubRow(${id})">+ Add another</button>
+      </div>
+      <div class="field-grid full" style="margin-bottom:16px">
+        <div class="field">
+          <label>Additional Needs / Notes</label>
+          <input type="text" placeholder="e.g. ADHD, dyslexia, EpiPen...">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:12px">
+        <label>Anything else your Chief of Staff should know about this child</label>
+        <textarea placeholder="e.g. Hates surprises, best friend is Mia, gets anxious on Mondays, medication at 1pm..."></textarea>
+      </div>
+      <button class="remove-child" onclick="removeChild(${id})">Remove</button>
+    </div>
+  `;
+  document.getElementById('childCards').appendChild(card);
+  addClubRow(id); // seed one empty row
+  updateProgress();
+}
+
+function addClubRow(childId) {
+  const container = document.getElementById(`clubs-${childId}`);
+  if (!container) return;
+  const row = document.createElement('div');
+  row.className = 'club-row';
+  row.innerHTML = `
+    <div class="field">
+      <label>Day</label>
+      <select class="club-day">
+        <option value="">Day...</option>
+        <option>Monday</option><option>Tuesday</option><option>Wednesday</option>
+        <option>Thursday</option><option>Friday</option><option>Saturday</option><option>Sunday</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Club</label>
+      <input type="text" class="club-name" placeholder="e.g. Swimming">
+    </div>
+    <div class="field">
+      <label>Time</label>
+      <input type="time" class="club-time">
+    </div>
+    <button type="button" class="trade-remove" onclick="this.parentNode.remove()">×</button>
+  `;
+  container.appendChild(row);
+}
+
+function toggleChild(id) {
+  document.getElementById(`child-${id}`).classList.toggle('open');
+}
+
+function updateChildName(id, name) {
+  const d = document.getElementById(`name-display-${id}`);
+  const a = document.getElementById(`avatar-${id}`);
+  if (d) d.textContent = name || 'New Child';
+  if (a) a.textContent = name ? name[0].toUpperCase() : '?';
+}
+
+function updateChildAge(id, dob) {
+  const el = document.getElementById(`age-display-${id}`);
+  if (el && dob) {
+    const age = Math.floor((new Date() - new Date(dob)) / (365.25*24*60*60*1000));
+    el.textContent = `Age ${age}`;
+  }
+}
+
+function removeChild(id) {
+  const c = document.getElementById(`child-${id}`);
+  if (c) c.remove();
+  updateProgress();
+}
+
+function addTag(event, input) {
+  if (event.key === 'Enter' || event.key === ',') {
+    event.preventDefault();
+    const value = input.value.trim().replace(',','');
+    if (!value) return;
+    const tag = document.createElement('div');
+    tag.className = 'tag';
+    tag.innerHTML = `${value} <span class="tag-remove" onclick="this.parentNode.remove()">×</span>`;
+    input.parentNode.insertBefore(tag, input);
+    input.value = '';
+  }
+}
+
+function addTradeRow() {
+  const row = document.createElement('div');
+  row.className = 'trade-row';
+  row.innerHTML = `
+    <div class="field"><label>Role</label><input type="text" placeholder="e.g. Electrician"></div>
+    <div class="field"><label>Name / Company</label><input type="text" placeholder="Name"></div>
+    <div class="field"><label>Contact</label><input type="text" placeholder="Phone or WhatsApp"></div>
+    <button class="trade-remove" onclick="this.parentNode.remove()">×</button>
+  `;
+  document.getElementById('tradeRows').appendChild(row);
+}
+
+function removeRow(btn) { btn.parentNode.remove(); }
+
+function handleFiles(files) {
+  const container = document.getElementById('uploadedFiles');
+  Array.from(files).forEach(file => {
+    const item = document.createElement('div');
+    item.className = 'uploaded-file';
+    item.innerHTML = `
+      <span class="uploaded-file-name"><span class="file-icon">📄</span>${file.name}</span>
+      <span class="file-status">Reading...</span>
+    `;
+    container.appendChild(item);
+    setTimeout(() => {
+      const s = item.querySelector('.file-status');
+      s.textContent = 'Processed';
+      s.classList.add('ready');
+    }, 1000 + Math.random() * 1000);
+  });
+  updateProgress();
+}
+
+const zone = document.getElementById('uploadZone');
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+zone.addEventListener('drop', e => {
+  e.preventDefault();
+  zone.classList.remove('dragover');
+  handleFiles(e.dataTransfer.files);
+});
+
+function selectTime(el) {
+  document.querySelectorAll('.time-option').forEach(t => t.classList.remove('selected'));
+  el.classList.add('selected');
+}
+
+function toggleCheck(el) {
+  el.classList.toggle('checked');
+  el.querySelector('.check-box').textContent = el.classList.contains('checked') ? '✓' : '';
+}
+
+function updateProgress() {
+  const name = document.getElementById('ceoName').value;
+  const phone = document.getElementById('ceoPhone').value;
+  const hasChildren = document.getElementById('childCards').children.length > 0;
+  const hasFiles = document.getElementById('uploadedFiles').children.length > 0;
+  let score = 0;
+  if (name) score += 25;
+  if (phone) score += 25;
+  if (hasChildren) score += 30;
+  if (hasFiles) score += 20;
+  document.getElementById('progressFill').style.width = score + '%';
+  document.getElementById('progressPct').textContent = score + '%';
+}
+
+function goTo(id, navIdx) {
+  document.getElementById(id).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.querySelectorAll('.nav-item').forEach((n,i) => {
+    n.classList.toggle('active', i === navIdx);
+  });
+}
+
+function saveProfile() {
+  const btn = document.querySelector('.save-btn');
+  const status = document.getElementById('saveStatus');
+  btn.textContent = 'Saving...';
+  setTimeout(() => {
+    btn.textContent = 'Saved ✓';
+    status.textContent = 'All changes saved';
+    status.style.color = 'var(--green)';
+    setTimeout(() => {
+      btn.textContent = 'Save Profile';
+      status.textContent = 'Auto-saving on';
+      status.style.color = '';
+    }, 2500);
+  }, 700);
+}
+
+window.addEventListener('load', () => {});
+</script>
+</body>
+</html>

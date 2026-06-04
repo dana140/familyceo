@@ -879,6 +879,29 @@ body {
 
     <div class="content">
 
+      <!-- Returning user: load existing profile -->
+      <div style="background:var(--white);border:1px solid var(--border);border-radius:var(--radius-lg);
+                  padding:20px 24px;margin-bottom:20px;display:flex;align-items:flex-end;
+                  gap:16px;box-shadow:var(--shadow-sm);">
+        <div class="field" style="flex:1;margin:0;">
+          <label>Already have a profile? Load it here</label>
+          <input type="tel" id="loadPhone" placeholder="+44 7700 000000">
+        </div>
+        <button id="loadBtn" onclick="loadExistingProfile()"
+          style="background:transparent;border:1px solid var(--border-focus);color:var(--ink-mid);
+                 padding:11px 20px;border-radius:var(--radius);font-size:11px;font-weight:500;
+                 letter-spacing:0.14em;text-transform:uppercase;cursor:pointer;
+                 font-family:'Jost',sans-serif;white-space:nowrap;transition:all 0.15s;flex-shrink:0;">
+          Load My Profile
+        </button>
+      </div>
+      <div id="loadBanner" style="display:none;background:var(--green-light);
+           border:1px solid rgba(58,125,88,0.2);border-radius:var(--radius);
+           padding:12px 18px;margin-bottom:20px;font-size:12px;color:var(--green);
+           letter-spacing:0.04em;">
+        ✓ Profile loaded! Make any changes and hit Save.
+      </div>
+
       <div class="intro-note">
         <strong>Welcome to your Command Centre.</strong> The more you tell us, the smarter your Chief of Staff becomes. This takes about 10 minutes — and it's the last time you'll have to think about most of this.
       </div>
@@ -1251,11 +1274,25 @@ function addChild(data = {}) {
     </div>
   `;
   document.getElementById('childCards').appendChild(card);
-  addClubRow(id); // seed one empty row
+
+  // Pre-fill school if loading an existing profile
+  if (data.school) {
+    const s = document.getElementById(`child-school-${id}`);
+    if (s) s.value = data.school;
+  }
+
+  // Pre-fill activities — parse "Swimming Monday 16:00, Football Saturday 10:00" back to rows
+  if (data.activities) {
+    const acts = data.activities.split(',').map(s => s.trim()).filter(Boolean).map(parseActivity);
+    acts.forEach(a => addClubRow(id, a));
+  } else {
+    addClubRow(id); // seed one empty row
+  }
+
   updateProgress();
 }
 
-function addClubRow(childId) {
+function addClubRow(childId, data = {}) {
   const container = document.getElementById(`clubs-${childId}`);
   if (!container) return;
   const row = document.createElement('div');
@@ -1280,6 +1317,9 @@ function addClubRow(childId) {
     <button type="button" class="trade-remove" onclick="this.parentNode.remove()">×</button>
   `;
   container.appendChild(row);
+  if (data.day)  row.querySelector('.club-day').value  = data.day;
+  if (data.club) row.querySelector('.club-name').value = data.club;
+  if (data.time) row.querySelector('.club-time').value = data.time;
 }
 
 function toggleChild(id) {
@@ -1459,6 +1499,55 @@ async function saveProfile() {
     result.style.color = 'var(--red)';
     result.textContent = '❌ ' + err.message;
     result.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+}
+
+// ── Load existing profile ─────────────────────────────────────────────────────
+const WEEKDAYS = new Set(['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']);
+
+function parseActivity(str) {
+  const parts = str.trim().split(' ');
+  const time = /^\d{1,2}:\d{2}$/.test(parts[parts.length - 1]) ? parts.pop() : '';
+  const day  = WEEKDAYS.has(parts[parts.length - 1]) ? parts.pop() : '';
+  return { club: parts.join(' '), day, time };
+}
+
+async function loadExistingProfile() {
+  const phone  = document.getElementById('loadPhone').value.trim();
+  const btn    = document.getElementById('loadBtn');
+  const banner = document.getElementById('loadBanner');
+  if (!phone) return;
+
+  btn.textContent = 'Loading…';
+  btn.disabled = true;
+  banner.style.display = 'none';
+
+  try {
+    const res  = await fetch(`https://familyceo-production.up.railway.app/get-profile?phone=${encodeURIComponent(phone)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Profile not found');
+
+    // Top-level fields
+    document.getElementById('ceoName').value  = data.mum_name  || '';
+    document.getElementById('ceoPhone').value = data.phone || phone;
+
+    // Re-build children cards
+    document.getElementById('childCards').innerHTML = '';
+    childCount = 0;
+    (data.children || []).forEach(c => addChild(c));
+
+    banner.style.display = 'block';
+    document.querySelector('.content').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    btn.textContent = 'Loaded ✓';
+    updateProgress();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'Load My Profile';
+    banner.style.background = 'var(--red-light)';
+    banner.style.borderColor = 'rgba(192,57,43,0.25)';
+    banner.style.color = 'var(--red)';
+    banner.textContent = '❌ ' + err.message;
+    banner.style.display = 'block';
   }
 }
 

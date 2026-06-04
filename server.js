@@ -745,6 +745,32 @@ ${text.slice(0, 8000)}`
   }
 });
 
+// ── Web form profile load ─────────────────────────────────────────────────────
+app.get('/get-profile', async (req, res) => {
+  const phone = normalisePhone(req.query.phone || '');
+  if (!phone) return res.status(400).json({ error: 'phone query parameter required' });
+
+  const { data: profile, error } = await supabase
+    .from('profiles')
+    .select('mum_name, whatsapp_number, children')
+    .eq('whatsapp_number', phone)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: error.message });
+  if (!profile) return res.status(404).json({ error: 'No profile found for that number' });
+
+  res.json({
+    mum_name: profile.mum_name,
+    phone:    profile.whatsapp_number,
+    children: (profile.children || []).map(c => ({
+      name:       c.name       || '',
+      age:        c.age        || null,
+      school:     c.school     || '',
+      activities: c.activities || '',
+    })),
+  });
+});
+
 // ── Web form profile save ─────────────────────────────────────────────────────
 app.post('/save-profile', async (req, res) => {
   const { phone_number, mum_name, children = [] } = req.body;

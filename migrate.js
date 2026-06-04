@@ -1,8 +1,9 @@
 require('dotenv').config();
 const { Client } = require('pg');
 
-// profiles and reminders use CREATE IF NOT EXISTS — safe to run repeatedly.
-// user_profiles uses DROP + RECREATE to fix any schema drift (wrong/missing columns).
+// profiles and reminders: CREATE IF NOT EXISTS — safe to run repeatedly.
+// user_profiles: ALTER to add missing columns and fix TEXT→JSONB type drift,
+// then CREATE IF NOT EXISTS as a fallback for fresh deploys.
 const SQL = `
 create table if not exists profiles (
   id uuid primary key default gen_random_uuid(),
@@ -33,20 +34,37 @@ create table if not exists reminders (
   created_at timestamptz default now()
 );
 
-drop table if exists user_profiles;
-
-create table user_profiles (
-  id            uuid        primary key default gen_random_uuid(),
-  phone_number  text        unique not null,
-  name          text,
-  children      jsonb       default '[]'::jsonb,
-  schools       text,
-  priorities    text,
-  pending_media jsonb       default '[]'::jsonb,
-  onboarding_step int       not null default 1,
-  onboarded_at  timestamptz,
-  created_at    timestamptz default now()
+-- Create fresh if it doesn't exist yet
+create table if not exists user_profiles (
+  id              uuid        primary key default gen_random_uuid(),
+  phone_number    text        unique not null,
+  name            text,
+  children        jsonb       default '[]'::jsonb,
+  schools         text,
+  priorities      text,
+  pending_media   jsonb       default '[]'::jsonb,
+  onboarding_step int         not null default 1,
+  onboarded_at    timestamptz,
+  created_at      timestamptz default now()
 );
+
+-- Add any missing columns (idempotent — safe to re-run)
+alter table user_profiles add column if not exists name            text;
+alter table user_profiles add column if not exists schools         text;
+alter table user_profiles add column if not exists priorities      text;
+alter table user_profiles add column if not exists pending_media   jsonb default '[]'::jsonb;
+alter table user_profiles add column if not exists onboarding_step int   not null default 1;
+alter table user_profiles add column if not exists onboarded_at    timestamptz;
+alter table user_profiles add column if not exists created_at      timestamptz default now();
+
+-- Fix TEXT→JSONB type drift (children stored as string when column was TEXT)
+do $$ begin
+  alter table user_profiles
+    alter column children      type jsonb using case when children      is null then '[]'::jsonb else children::jsonb end,
+    alter column pending_media type jsonb using case when pending_media is null then '[]'::jsonb else pending_media::jsonb end;
+exception when others then
+  null; -- columns already jsonb, nothing to do
+end $$;
 
 alter table user_profiles enable row level security;
 do $$ begin

@@ -203,6 +203,14 @@ MEMORY & SAVING:
 }
 
 // ── Onboarding ────────────────────────────────────────────────────────────────
+
+// user_profiles.children may be TEXT not JSONB (schema drift) — parse safely
+function parseJsonField(val, fallback = []) {
+  if (val == null) return fallback;
+  if (typeof val === 'string') { try { return JSON.parse(val); } catch { return fallback; } }
+  return val;
+}
+
 function parseChildren(text) {
   const children = [];
   for (const m of text.matchAll(/([A-Za-z''-]+)[\s,]+(?:aged?\s+)?(\d+)/gi)) {
@@ -223,14 +231,27 @@ function onboardingReprompt(step, state) {
   }
 }
 
+const RESET_TRIGGERS = new Set(['hi', 'hello', 'hey', 'start', 'restart', 'start over', 'reset', 'begin']);
+
 async function handleOnboarding(phone, body, state) {
+  const normalised = body.trim().toLowerCase();
+
+  // "Hi" (or similar) on a stuck/partial record → wipe and restart cleanly
+  if (state && !state.onboarded_at && RESET_TRIGGERS.has(normalised)) {
+    await supabase.from('user_profiles').delete().eq('phone_number', phone);
+    const { error } = await supabase.from('user_profiles').insert({ phone_number: phone, onboarding_step: 1 });
+    if (error) throw error;
+    console.log(`🔄 Onboarding reset for ${phone}`);
+    return "No problem — let's start fresh! 👋\n\nWhat's your name?";
+  }
+
   // Resume from the right step even if the record is partially filled
-  // (e.g. schema drift left some columns null, or a previous crash mid-write)
+  const parsedChildren = parseJsonField(state?.children);
   let step = Number(state?.onboarding_step) || 1;
   if (state) {
-    if (step > 1 && !state.name)                              step = 1;
-    else if (step > 3 && !state.children?.length)            step = 3;
-    else if (step > 4 && !state.schools)                     step = 4;
+    if (step > 1 && !state.name)              step = 1;
+    else if (step > 3 && !parsedChildren.length) step = 3;
+    else if (step > 4 && !state.schools)      step = 4;
   }
 
   console.log(`🧭 Onboarding step ${step} (raw: ${state?.onboarding_step ?? 'new'}) for ${phone}`);
@@ -294,8 +315,9 @@ async function completeOnboarding(phone, data) {
     .eq('phone_number', phone);
   if (upErr) throw upErr;
 
-  // Populate the profiles table so the AI flow works immediately
-  const children = (data.children || []).map(c => ({
+  // Populate the profiles table so the AI flow works immediately.
+  // parseJsonField handles children being TEXT (schema drift) or proper JSONB.
+  const children = parseJsonField(data.children).map(c => ({
     name:          c.name,
     age:           c.age,
     school:        data.schools || '',

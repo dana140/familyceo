@@ -232,7 +232,7 @@ async function handleOnboarding(phone, body, state) {
   if (normalised === 'done') {
     const { data: profile } = await supabase
       .from('profiles')
-      .select('mum_name')
+      .select('mum_name, preferences')
       .eq('whatsapp_number', phone)
       .maybeSingle();
 
@@ -242,15 +242,16 @@ async function handleOnboarding(phone, body, state) {
         .eq('phone_number', phone);
       if (error) throw error;
       console.log(`✅ Onboarding complete for ${profile.mum_name} (${phone})`);
-      const name = profile.mum_name;
+      const name         = profile.mum_name;
+      const briefingTime = (profile.preferences || {}).briefing_time || '07:30';
       return (
         `You're all set, ${name}! 🎉 Here's what I can do for you:\n\n` +
-        `☀️ *Morning briefing* — every day at 7:30am I'll tell you what's on your plate\n\n` +
+        `☀️ *Morning briefing* — I'll message you every morning at ${briefingTime} with what's on your plate\n\n` +
         `📅 *Your schedule* — tell me about appointments, school events, clubs, playdates and I'll keep track\n\n` +
-        `⏰ *Reminders* — just say "remind me to..." and I'll ping you at the right time\n\n` +
+        `⏰ *Reminders* — just say 'remind me to...' and I'll ping you at the right time\n\n` +
         `📸 *Send me anything* — forward school letters, emails, timetables as a photo and I'll read and remember them\n\n` +
         `🧠 *I remember everything* — the more you tell me, the more useful I get\n\n` +
-        `*Try me now — what's coming up this week?*\n\n` +
+        `Try me now — what's coming up this week?\n\n` +
         `P.S. You can update your family profile anytime at https://familyceo.netlify.app 🔗`
       );
     }

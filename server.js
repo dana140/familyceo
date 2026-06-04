@@ -204,151 +204,62 @@ MEMORY & SAVING:
 
 // ── Onboarding ────────────────────────────────────────────────────────────────
 
-// user_profiles.children may be TEXT not JSONB (schema drift) — parse safely
-function parseJsonField(val, fallback = []) {
-  if (val == null) return fallback;
-  if (typeof val === 'string') { try { return JSON.parse(val); } catch { return fallback; } }
-  return val;
-}
+const WELCOME_MSG =
+  `Welcome to Family CEO! 👋 I'm your personal family chief of staff.\n\n` +
+  `Before we get started, take 2 minutes to set up your family profile ` +
+  `so I know who you are and how to help you:\n\n` +
+  `👉 familyceo.netlify.app\n\n` +
+  `Reply *done* when you've finished and I'll be ready to go!`;
 
-function parseChildren(text) {
-  const children = [];
-  for (const m of text.matchAll(/([A-Za-z''-]+)[\s,]+(?:aged?\s+)?(\d+)/gi)) {
-    children.push({ name: m[1], age: parseInt(m[2], 10) });
-  }
-  // Fallback: couldn't parse structured data, store raw
-  return children.length > 0 ? children : [{ name: text.trim(), age: null }];
-}
-
-function onboardingReprompt(step, state) {
-  switch (step) {
-    case 1: return "What's your name?";
-    case 2: return "How many children do you have?";
-    case 3: return 'What are their names and ages? (e.g. "Ella 8, Noah 5")';
-    case 4: return `What school${(state?.children || []).length !== 1 ? 's' : ''} do they go to?`;
-    case 5: return "What's the one thing you most want help keeping on top of?";
-    default: return "What's your name?";
-  }
-}
-
-const RESET_TRIGGERS = new Set(['hi', 'hello', 'hey', 'start', 'restart', 'start over', 'reset', 'begin']);
+const NUDGE_MSG =
+  `To get started, fill in your family profile at:\n\n` +
+  `👉 familyceo.netlify.app\n\n` +
+  `Reply *done* when you're ready!`;
 
 async function handleOnboarding(phone, body, state) {
+  // Brand new user — create record and send welcome
+  if (!state) {
+    const { error } = await supabase.from('user_profiles')
+      .insert({ phone_number: phone, onboarding_step: 1 });
+    if (error) throw error;
+    console.log(`👋 New user onboarding started: ${phone}`);
+    return WELCOME_MSG;
+  }
+
   const normalised = body.trim().toLowerCase();
 
-  // "Hi" (or similar) on a stuck/partial record → wipe and restart cleanly
-  if (state && !state.onboarded_at && RESET_TRIGGERS.has(normalised)) {
-    await supabase.from('user_profiles').delete().eq('phone_number', phone);
-    const { error } = await supabase.from('user_profiles').insert({ phone_number: phone, onboarding_step: 1 });
-    if (error) throw error;
-    console.log(`🔄 Onboarding reset for ${phone}`);
-    return "No problem — let's start fresh! 👋\n\nWhat's your name?";
-  }
+  // "done" → check profiles table for their completed form
+  if (normalised === 'done') {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('mum_name')
+      .eq('whatsapp_number', phone)
+      .maybeSingle();
 
-  // Resume from the right step even if the record is partially filled
-  const parsedChildren = parseJsonField(state?.children);
-  let step = Number(state?.onboarding_step) || 1;
-  if (state) {
-    if (step > 1 && !state.name)              step = 1;
-    else if (step > 3 && !parsedChildren.length) step = 3;
-    else if (step > 4 && !state.schools)      step = 4;
-  }
-
-  console.log(`🧭 Onboarding step ${step} (raw: ${state?.onboarding_step ?? 'new'}) for ${phone}`);
-
-  if (!state) {
-    const { error } = await supabase.from('user_profiles').insert({ phone_number: phone, onboarding_step: 1 });
-    if (error) throw error;
-    return "Welcome to Family CEO! 👋 I'm your personal family chief of staff — here to keep you organised and one step ahead.\n\nBefore we get started, I need to know a bit about your family. What's your name?";
-  }
-
-  switch (step) {
-    case 1: {
+    if (profile?.mum_name) {
       const { error } = await supabase.from('user_profiles')
-        .update({ name: body.trim(), onboarding_step: 2 })
+        .update({ name: profile.mum_name, onboarded_at: new Date().toISOString() })
         .eq('phone_number', phone);
       if (error) throw error;
-      return `Great, ${body.trim()}! How many children do you have?`;
+      console.log(`✅ Onboarding complete for ${profile.mum_name} (${phone})`);
+      const name = profile.mum_name;
+      return (
+        `You're all set, ${name}! 🎉 Here's what I can do for you:\n\n` +
+        `☀️ *Morning briefing* — every day at 7:30am I'll tell you what's on your plate\n\n` +
+        `📅 *Your schedule* — tell me about appointments, school events, clubs, playdates and I'll keep track\n\n` +
+        `⏰ *Reminders* — just say "remind me to..." and I'll ping you at the right time\n\n` +
+        `📸 *Send me anything* — forward school letters, emails, timetables as a photo and I'll read and remember them\n\n` +
+        `🧠 *I remember everything* — the more you tell me, the more useful I get\n\n` +
+        `*Try me now — what's coming up this week?*\n\n` +
+        `P.S. You can update your family profile anytime at familyceo.netlify.app 🔗`
+      );
     }
 
-    case 2: {
-      const { error } = await supabase.from('user_profiles')
-        .update({ onboarding_step: 3 })
-        .eq('phone_number', phone);
-      if (error) throw error;
-      return 'What are their names and ages? (e.g. "Ella 8, Noah 5")';
-    }
-
-    case 3: {
-      const children = parseChildren(body);
-      const { error } = await supabase.from('user_profiles')
-        .update({ children, onboarding_step: 4 })
-        .eq('phone_number', phone);
-      if (error) throw error;
-      return `Got it! What school${children.length !== 1 ? 's' : ''} do they go to?`;
-    }
-
-    case 4: {
-      const { error } = await supabase.from('user_profiles')
-        .update({ schools: body.trim(), onboarding_step: 5 })
-        .eq('phone_number', phone);
-      if (error) throw error;
-      return "Almost done! What's the one thing you most want help keeping on top of?";
-    }
-
-    case 5: {
-      const completed = { ...state, priorities: body.trim() };
-      await completeOnboarding(phone, completed);
-      const kids = parseJsonField(completed.children).map(c => c.name).filter(Boolean);
-      const kidsStr = kids.length > 1
-        ? kids.slice(0, -1).join(', ') + ' and ' + kids[kids.length - 1]
-        : kids[0] || 'your kids';
-      return `Perfect, ${completed.name}! I'm ready to be your Family Chief of Staff.\nHere's how to get the most out of me straight away:\n\n📅 *Your schedule* — tell me everything coming up: school events, appointments, clubs, playdates. Start with this week!\n\n🏃 *Kids' clubs & activities* — tell me ${kidsStr}'s regular weekly clubs so I can factor them into your week (e.g. "Ellie has swimming Mondays 4pm, Lexie has gymnastics Thursdays 5pm")\n\n📸 *Forward me anything* — school letters, emails, the football rota on the fridge. Take a photo and send it, I'll read it and remember it.\n\n⏰ *Reminders* — just say "remind me to..." and I'll ping you at the right time\n\n☀️ *Morning briefing* — I'll message you every day at 7:30am with what's on your plate\n\n*Start now — what clubs do your kids do, and what's coming up this week?*`;
-    }
-
-    default:
-      // Shouldn't reach here — reset to step 1
-      await supabase.from('user_profiles').update({ onboarding_step: 1 }).eq('phone_number', phone);
-      return "Let's start fresh — what's your name?";
+    return `I can't find your profile yet — make sure you've saved it at familyceo.netlify.app and try again!`;
   }
-}
 
-async function completeOnboarding(phone, data) {
-  const now = new Date().toISOString();
-
-  const { error: upErr } = await supabase.from('user_profiles')
-    .update({ priorities: data.priorities, onboarded_at: now })
-    .eq('phone_number', phone);
-  if (upErr) throw upErr;
-
-  // Populate the profiles table so the AI flow works immediately.
-  // parseJsonField handles children being TEXT (schema drift) or proper JSONB.
-  const children = parseJsonField(data.children).map(c => ({
-    name:          c.name,
-    age:           c.age,
-    school:        data.schools || '',
-    year_group:    '',
-    dietary_needs: '',
-    allergies:     '',
-    activities:    '',
-    extra_needs:   '',
-  }));
-
-  const { error: profErr } = await supabase.from('profiles').upsert({
-    whatsapp_number: phone,
-    mum_name:        data.name,
-    children,
-    household:       {},
-    preferences: {
-      extra_notes:   data.priorities || '',
-      briefing_time: '07:30',
-    },
-    notes:     [],
-    documents: [],
-  }, { onConflict: 'whatsapp_number' });
-  if (profErr) throw profErr;
-
-  console.log(`✅ Onboarding complete for ${data.name} (${phone})`);
+  // Any other message while waiting → nudge toward the form
+  return NUDGE_MSG;
 }
 
 // ── Info extractor ────────────────────────────────────────────────────────────
@@ -914,25 +825,10 @@ app.post('/webhook', async (req, res) => {
     if (onbError) throw onbError;
 
     if (!onboarding?.onboarded_at) {
+      // Images sent before onboarding is complete — nudge toward the form
       if (numMedia > 0) {
-        // Save media reference but don't advance the step.
-        // pending_media write is best-effort — non-fatal if column doesn't exist yet.
-        const pending = [...(onboarding?.pending_media || []), {
-          url:  req.body.MediaUrl0,
-          type: req.body.MediaContentType0 || 'unknown',
-        }];
-        if (onboarding) {
-          await supabase.from('user_profiles').update({ pending_media: pending }).eq('phone_number', phone)
-            .then(({ error }) => { if (error) console.warn('⚠️  pending_media update skipped:', error.message); });
-        } else {
-          // Insert without pending_media — column may not exist; we'll save media after migration
-          const { error } = await supabase.from('user_profiles').insert({ phone_number: phone, onboarding_step: 1 });
-          if (error) throw error;
-        }
-        const step = onboarding?.onboarding_step || 1;
-        const reprompt = onboardingReprompt(step, onboarding);
         res.type('text/xml');
-        return res.send(buildTwimlResponse(`Got it — I'll come back to that once we've finished setup.\n\n${reprompt}`));
+        return res.send(buildTwimlResponse(NUDGE_MSG));
       }
 
       const reply = await handleOnboarding(phone, body, onboarding || null);

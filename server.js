@@ -834,6 +834,66 @@ ${text.slice(0, 8000)}`
   }
 });
 
+// ── Web form profile save ─────────────────────────────────────────────────────
+app.post('/save-profile', async (req, res) => {
+  const { phone_number, mum_name, children = [] } = req.body;
+
+  if (!phone_number || !mum_name) {
+    return res.status(400).json({ error: 'phone_number and mum_name are required' });
+  }
+
+  const phone = normalisePhone(phone_number);
+  const now   = new Date().toISOString();
+
+  // Build flat summaries used by user_profiles
+  const schools    = [...new Set(children.map(c => c.school).filter(Boolean))].join(', ');
+  const activities = children.map(c => c.activities).filter(Boolean).join('; ');
+
+  try {
+    // 1. Upsert user_profiles — onboarded_at set so WhatsApp skips the onboarding flow
+    const { error: upErr } = await supabase.from('user_profiles').upsert({
+      phone_number:    phone,
+      name:            mum_name,
+      children:        children.map(c => ({ name: c.name, age: Number(c.age) || null })),
+      schools,
+      priorities:      activities,
+      onboarding_step: 5,
+      onboarded_at:    now,
+    }, { onConflict: 'phone_number' });
+    if (upErr) throw upErr;
+
+    // 2. Upsert profiles — preserve any documents already uploaded via /upload
+    const { data: existing } = await supabase
+      .from('profiles').select('documents').eq('whatsapp_number', phone).maybeSingle();
+
+    const { error: profErr } = await supabase.from('profiles').upsert({
+      whatsapp_number: phone,
+      mum_name,
+      children: children.map(c => ({
+        name:          c.name,
+        age:           Number(c.age) || null,
+        school:        c.school        || '',
+        year_group:    '',
+        dietary_needs: '',
+        allergies:     '',
+        activities:    c.activities    || '',
+        extra_needs:   '',
+      })),
+      household:   {},
+      preferences: { extra_notes: activities, briefing_time: '07:30' },
+      notes:       [],
+      documents:   existing?.documents || [],
+    }, { onConflict: 'whatsapp_number' });
+    if (profErr) throw profErr;
+
+    console.log(`✅ Web form profile saved for ${mum_name} (${phone})`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ /save-profile error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── WhatsApp webhook ──────────────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
   const from     = req.body.From;

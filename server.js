@@ -1,4 +1,5 @@
 require('dotenv').config();
+const { migrate } = require('./migrate');
 const express = require('express');
 const https   = require('https');
 const twilio  = require('twilio');
@@ -890,9 +891,14 @@ cron.schedule('* * * * *', () => {
 }, { timezone: 'Europe/London' });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ Family CEO webhook server running on port ${PORT}`);
-  console.log(`   POST http://localhost:${PORT}/webhook`);
-  console.log(`   POST http://localhost:${PORT}/upload`);
-  console.log(`   ⏰ Scheduler running — checking reminders every minute`);
-});
+
+migrate()
+  .catch(e => console.error('⚠️  Migration skipped (no DATABASE_URL?):', e.message))
+  .finally(() => {
+    app.listen(PORT, () => {
+      console.log(`✅ Family CEO webhook server running on port ${PORT}`);
+      console.log(`   POST http://localhost:${PORT}/webhook`);
+      console.log(`   POST http://localhost:${PORT}/upload`);
+      console.log(`   ⏰ Scheduler running — checking reminders every minute`);
+    });
+  });

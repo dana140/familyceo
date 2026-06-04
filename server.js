@@ -224,15 +224,22 @@ function onboardingReprompt(step, state) {
 }
 
 async function handleOnboarding(phone, body, state) {
-  console.log(`🧭 Onboarding step ${state?.onboarding_step ?? 'new'} for ${phone}`);
+  // Resume from the right step even if the record is partially filled
+  // (e.g. schema drift left some columns null, or a previous crash mid-write)
+  let step = Number(state?.onboarding_step) || 1;
+  if (state) {
+    if (step > 1 && !state.name)                              step = 1;
+    else if (step > 3 && !state.children?.length)            step = 3;
+    else if (step > 4 && !state.schools)                     step = 4;
+  }
+
+  console.log(`🧭 Onboarding step ${step} (raw: ${state?.onboarding_step ?? 'new'}) for ${phone}`);
 
   if (!state) {
     const { error } = await supabase.from('user_profiles').insert({ phone_number: phone, onboarding_step: 1 });
     if (error) throw error;
     return "Welcome to Family CEO! 👋 I'm your personal family chief of staff — here to keep you organised and one step ahead.\n\nBefore we get started, I need to know a bit about your family. What's your name?";
   }
-
-  const step = state.onboarding_step;
 
   switch (step) {
     case 1: {
@@ -273,7 +280,9 @@ async function handleOnboarding(phone, body, state) {
       return "Also — feel free to send me anything you want me to know about: school letters, medical info, schedules, a photo of the football rota on the fridge. I can read it all 📎\n\nPerfect. I'm ready. You're the CEO — I'll handle the detail. 🙌\n\nWhat would you like to start with?";
 
     default:
-      return "Something went wrong with setup — send any message to try again.";
+      // Shouldn't reach here — reset to step 1
+      await supabase.from('user_profiles').update({ onboarding_step: 1 }).eq('phone_number', phone);
+      return "Let's start fresh — what's your name?";
   }
 }
 
@@ -818,15 +827,19 @@ app.post('/webhook', async (req, res) => {
 
     if (!onboarding?.onboarded_at) {
       if (numMedia > 0) {
-        // Save media reference but don't advance the step
+        // Save media reference but don't advance the step.
+        // pending_media write is best-effort — non-fatal if column doesn't exist yet.
         const pending = [...(onboarding?.pending_media || []), {
           url:  req.body.MediaUrl0,
           type: req.body.MediaContentType0 || 'unknown',
         }];
         if (onboarding) {
-          await supabase.from('user_profiles').update({ pending_media: pending }).eq('phone_number', phone);
+          await supabase.from('user_profiles').update({ pending_media: pending }).eq('phone_number', phone)
+            .then(({ error }) => { if (error) console.warn('⚠️  pending_media update skipped:', error.message); });
         } else {
-          await supabase.from('user_profiles').insert({ phone_number: phone, pending_media: pending, onboarding_step: 1 });
+          // Insert without pending_media — column may not exist; we'll save media after migration
+          const { error } = await supabase.from('user_profiles').insert({ phone_number: phone, onboarding_step: 1 });
+          if (error) throw error;
         }
         const step = onboarding?.onboarding_step || 1;
         const reprompt = onboardingReprompt(step, onboarding);

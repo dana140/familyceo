@@ -28,11 +28,11 @@ const conversations = {};
 function normalisePhone(raw) {
   let n = (raw || '')
     .replace('whatsapp:', '')
-    .replace(/\s+/g, '')          // strip all spaces
-    .replace(/^00/, '+')          // 00XX → +XX
+    .replace(/\s+/g, '')           // strip all spaces
+    .replace(/^00/, '+')           // 00XX → +XX
     .replace(/^0(\d{10})$/, '+44$1'); // 07XXXXXXXXXX → +447XXXXXXXXXX (UK)
   if (!n.startsWith('+')) n = `+${n}`;
-  return `whatsapp:${n}`;
+  return n; // stored format is +447... — no whatsapp: prefix
 }
 
 // ── Profile loader ────────────────────────────────────────────────────────────

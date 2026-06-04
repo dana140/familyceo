@@ -208,12 +208,12 @@ const WELCOME_MSG =
   `Welcome to Family CEO! 👋 I'm your personal family chief of staff.\n\n` +
   `Before we get started, take 2 minutes to set up your family profile ` +
   `so I know who you are and how to help you:\n\n` +
-  `👉 familyceo.netlify.app\n\n` +
+  `👉 https://familyceo.netlify.app\n\n` +
   `Reply *done* when you've finished and I'll be ready to go!`;
 
 const NUDGE_MSG =
   `To get started, fill in your family profile at:\n\n` +
-  `👉 familyceo.netlify.app\n\n` +
+  `👉 https://familyceo.netlify.app\n\n` +
   `Reply *done* when you're ready!`;
 
 async function handleOnboarding(phone, body, state) {
@@ -251,11 +251,11 @@ async function handleOnboarding(phone, body, state) {
         `📸 *Send me anything* — forward school letters, emails, timetables as a photo and I'll read and remember them\n\n` +
         `🧠 *I remember everything* — the more you tell me, the more useful I get\n\n` +
         `*Try me now — what's coming up this week?*\n\n` +
-        `P.S. You can update your family profile anytime at familyceo.netlify.app 🔗`
+        `P.S. You can update your family profile anytime at https://familyceo.netlify.app 🔗`
       );
     }
 
-    return `I can't find your profile yet — make sure you've saved it at familyceo.netlify.app and try again!`;
+    return `I can't find your profile yet — make sure you've saved it at https://familyceo.netlify.app and try again!`;
   }
 
   // Any other message while waiting → nudge toward the form

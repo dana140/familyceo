@@ -1145,6 +1145,23 @@ body {
 
       </div>
 
+      <!-- Bottom save -->
+      <div style="padding: 48px 0 16px; text-align: center;">
+        <button id="bottomSaveBtn" onclick="saveProfile()"
+          style="background: var(--ink); color: var(--white); border: none;
+                 padding: 16px 48px; border-radius: var(--radius); font-size: 14px;
+                 font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase;
+                 cursor: pointer; font-family: 'Jost', sans-serif;
+                 box-shadow: var(--shadow-md); transition: all 0.2s;">
+          Save My Profile
+        </button>
+        <div id="saveResult" style="display:none; margin-top: 24px; padding: 20px 28px;
+             background: var(--green-light); border: 1px solid rgba(58,125,88,0.25);
+             border-radius: var(--radius-lg); font-size: 14px; color: var(--green);
+             line-height: 1.7; font-weight: 400;">
+        </div>
+      </div>
+
     </div>
   </main>
 </div>
@@ -1181,7 +1198,7 @@ function addChild(data = {}) {
         </div>
         <div class="field">
           <label>Date of Birth</label>
-          <input type="date" oninput="updateChildAge(${id}, this.value)">
+          <input type="date" id="child-dob-${id}" oninput="updateChildAge(${id}, this.value)">
         </div>
         <div class="field">
           <label>Year Group</label>
@@ -1198,7 +1215,7 @@ function addChild(data = {}) {
       <div class="field-grid full" style="margin-bottom:16px">
         <div class="field">
           <label>School Name</label>
-          <input type="text" placeholder="e.g. Kerem School">
+          <input type="text" id="child-school-${id}" placeholder="e.g. Kerem School">
         </div>
       </div>
       <div class="field-grid" style="margin-bottom:16px">
@@ -1376,20 +1393,73 @@ function goTo(id, navIdx) {
   });
 }
 
-function saveProfile() {
-  const btn = document.querySelector('.save-btn');
-  const status = document.getElementById('saveStatus');
-  btn.textContent = 'Saving...';
-  setTimeout(() => {
-    btn.textContent = 'Saved ✓';
-    status.textContent = 'All changes saved';
-    status.style.color = 'var(--green)';
-    setTimeout(() => {
-      btn.textContent = 'Save Profile';
-      status.textContent = 'Auto-saving on';
-      status.style.color = '';
-    }, 2500);
-  }, 700);
+function getChildrenData() {
+  return Array.from(document.querySelectorAll('.child-card')).map(card => {
+    const idMatch = card.id.match(/child-(\d+)/);
+    const cid = idMatch ? idMatch[1] : null;
+    const name   = cid ? (document.getElementById(`child-name-${cid}`)?.value.trim()   || '') : '';
+    const school = cid ? (document.getElementById(`child-school-${cid}`)?.value.trim() || '') : '';
+    const dob    = cid ?  document.getElementById(`child-dob-${cid}`)?.value : null;
+    const age    = dob ? Math.floor((new Date() - new Date(dob)) / (365.25 * 24 * 60 * 60 * 1000)) : null;
+    const clubRows = cid ? Array.from(document.querySelectorAll(`#clubs-${cid} .club-row`)) : [];
+    const activities = clubRows.map(row => {
+      const day  = row.querySelector('.club-day')?.value;
+      const club = row.querySelector('.club-name')?.value.trim();
+      const time = row.querySelector('.club-time')?.value;
+      return [club, day, time].filter(Boolean).join(' ');
+    }).filter(Boolean).join(', ');
+    return { name, age, school, activities };
+  }).filter(c => c.name);
+}
+
+async function saveProfile() {
+  const phone   = document.getElementById('ceoPhone')?.value.trim();
+  const mumName = document.getElementById('ceoName')?.value.trim();
+  const result  = document.getElementById('saveResult');
+  const bottomBtn = document.getElementById('bottomSaveBtn');
+  const topBtn    = document.querySelector('.save-btn');
+
+  if (!phone || !mumName) {
+    result.style.display = 'block';
+    result.style.background = 'var(--red-light)';
+    result.style.borderColor = 'rgba(192,57,43,0.25)';
+    result.style.color = 'var(--red)';
+    result.textContent = !phone ? 'Please enter your WhatsApp number (About You section).'
+                                 : 'Please enter your name (About You section).';
+    result.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+
+  [bottomBtn, topBtn].forEach(b => { if (b) { b.disabled = true; b.textContent = 'Saving…'; } });
+
+  try {
+    const res = await fetch('https://familyceo-production.up.railway.app/save-profile', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ phone_number: phone, mum_name: mumName, children: getChildrenData() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+
+    [bottomBtn, topBtn].forEach(b => { if (b) { b.disabled = false; b.textContent = 'Saved ✓'; } });
+    document.getElementById('saveStatus').textContent = 'Profile saved';
+    document.getElementById('saveStatus').style.color = 'var(--green)';
+
+    result.style.display = 'block';
+    result.style.background = 'var(--green-light)';
+    result.style.borderColor = 'rgba(58,125,88,0.25)';
+    result.style.color = 'var(--green)';
+    result.innerHTML = `<strong>You're all set!</strong> Now go back to WhatsApp and reply <strong>done</strong> to your Family Chief of Staff.`;
+    result.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch (err) {
+    [bottomBtn, topBtn].forEach(b => { if (b) { b.disabled = false; b.textContent = 'Save My Profile'; } });
+    result.style.display = 'block';
+    result.style.background = 'var(--red-light)';
+    result.style.borderColor = 'rgba(192,57,43,0.25)';
+    result.style.color = 'var(--red)';
+    result.textContent = '❌ ' + err.message;
+    result.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
 }
 
 window.addEventListener('load', () => {});

@@ -845,11 +845,12 @@ app.post('/webhook', async (req, res) => {
 
   try {
     // ── Onboarding gate ───────────────────────────────────────────────────────
+    console.log(`🔍 Looking up user_profiles for: ${phone}`); // phone has whatsapp: stripped
     const { data: onboarding, error: onbError } = await supabase
       .from('user_profiles')
       .select('*')
       .eq('phone_number', phone)
-      .maybeSingle(); // maybeSingle: null data + null error when 0 rows (single() errors on 0 rows)
+      .maybeSingle();
 
     if (onbError) throw onbError;
 

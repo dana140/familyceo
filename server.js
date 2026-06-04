@@ -296,9 +296,15 @@ async function handleOnboarding(phone, body, state) {
       return "Almost done! What's the one thing you most want help keeping on top of?";
     }
 
-    case 5:
-      await completeOnboarding(phone, { ...state, priorities: body.trim() });
-      return "Also — feel free to send me anything you want me to know about: school letters, medical info, schedules, a photo of the football rota on the fridge. I can read it all 📎\n\nPerfect. I'm ready. You're the CEO — I'll handle the detail. 🙌\n\nWhat would you like to start with?";
+    case 5: {
+      const completed = { ...state, priorities: body.trim() };
+      await completeOnboarding(phone, completed);
+      const kids = parseJsonField(completed.children).map(c => c.name).filter(Boolean);
+      const kidsStr = kids.length > 1
+        ? kids.slice(0, -1).join(', ') + ' and ' + kids[kids.length - 1]
+        : kids[0] || 'your kids';
+      return `Perfect, ${completed.name}! I'm ready to be your Family Chief of Staff.\nHere's how to get the most out of me straight away:\n\n📅 *Your schedule* — tell me everything coming up: school events, appointments, clubs, playdates. Start with this week!\n\n🏃 *Kids' clubs & activities* — tell me ${kidsStr}'s regular weekly clubs so I can factor them into your week (e.g. "Ellie has swimming Mondays 4pm, Lexie has gymnastics Thursdays 5pm")\n\n📸 *Forward me anything* — school letters, emails, the football rota on the fridge. Take a photo and send it, I'll read it and remember it.\n\n⏰ *Reminders* — just say "remind me to..." and I'll ping you at the right time\n\n☀️ *Morning briefing* — I'll message you every day at 7:30am with what's on your plate\n\n*Start now — what clubs do your kids do, and what's coming up this week?*`;
+    }
 
     default:
       // Shouldn't reach here — reset to step 1

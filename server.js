@@ -631,8 +631,10 @@ async function runScheduler() {
   const londonDate = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
   const dayOfWeek  = londonDate.getDay(); // 0=Sun … 6=Sat
 
+  console.log(`⏰ Scheduler tick — ${timeStr} (${todayISO}, day=${dayOfWeek})`);
+
   // ── 1. User reminders ──────────────────────────────────────────────────────
-  const { data: reminders } = await supabase
+  const { data: reminders, error: remErr } = await supabase
     .from('reminders')
     .select('*')
     .eq('active', true)
@@ -640,14 +642,28 @@ async function runScheduler() {
     .eq('schedule_time', timeStr)
     .lte('start_date', todayISO);
 
+  if (remErr) {
+    console.error('⚠️  Reminders query error:', remErr.message);
+  } else {
+    console.log(`   Reminders matching ${timeStr}: ${reminders?.length ?? 0}`);
+  }
+
   for (const r of (reminders || [])) {
     if (r.end_date && r.end_date < todayISO) {
+      console.log(`   ↳ Skipping ${r.id} — past end_date (${r.end_date})`);
       await supabase.from('reminders').update({ active: false }).eq('id', r.id);
       continue;
     }
-    if (r.frequency === 'weekdays' && (dayOfWeek === 0 || dayOfWeek === 6)) continue;
-    if (r.last_sent_at && new Date(r.last_sent_at).toLocaleDateString('en-CA', { timeZone: 'Europe/London' }) === todayISO) continue;
+    if (r.frequency === 'weekdays' && (dayOfWeek === 0 || dayOfWeek === 6)) {
+      console.log(`   ↳ Skipping ${r.id} — weekdays only, today is day ${dayOfWeek}`);
+      continue;
+    }
+    if (r.last_sent_at && new Date(r.last_sent_at).toLocaleDateString('en-CA', { timeZone: 'Europe/London' }) === todayISO) {
+      console.log(`   ↳ Skipping ${r.id} — already sent today (last_sent_at: ${r.last_sent_at})`);
+      continue;
+    }
 
+    console.log(`   ↳ Firing reminder ${r.id}: "${r.context}" → ${r.whatsapp_number}`);
     try {
       const { data: profileRow } = await supabase
         .from('profiles').select('*').eq('whatsapp_number', r.whatsapp_number).single();
@@ -657,9 +673,9 @@ async function runScheduler() {
         last_sent_at: now.toISOString(),
         ...(r.frequency === 'once' ? { active: false } : {}),
       }).eq('id', r.id);
-      console.log(`⏰ Reminder sent to ${profileRow?.mum_name || r.whatsapp_number}: ${r.context}`);
+      console.log(`   ✅ Reminder sent to ${profileRow?.mum_name || r.whatsapp_number}`);
     } catch (e) {
-      console.error(`⚠️  Reminder failed for ${r.whatsapp_number}:`, e.message);
+      console.error(`   ❌ Reminder failed for ${r.whatsapp_number}:`, e.message);
     }
   }
 
@@ -670,8 +686,12 @@ async function runScheduler() {
     const briefingTime = (profile.preferences || {}).briefing_time || '07:30';
     if (briefingTime !== timeStr) continue;
 
+    console.log(`   Briefing due for ${profile.mum_name} (${briefingTime})`);
     const lastBriefingDate = (profile.preferences || {}).last_briefing_date;
-    if (lastBriefingDate === todayISO) continue;
+    if (lastBriefingDate === todayISO) {
+      console.log(`   ↳ Skipping — already sent today`);
+      continue;
+    }
 
     try {
       const briefing = await generateBriefing(profile);
@@ -679,9 +699,9 @@ async function runScheduler() {
       await supabase.from('profiles').update({
         preferences: { ...profile.preferences, last_briefing_date: todayISO },
       }).eq('whatsapp_number', profile.whatsapp_number);
-      console.log(`🌅 Morning briefing sent to ${profile.mum_name}`);
+      console.log(`   ✅ Morning briefing sent to ${profile.mum_name}`);
     } catch (e) {
-      console.error(`⚠️  Briefing failed for ${profile.mum_name}:`, e.message);
+      console.error(`   ❌ Briefing failed for ${profile.mum_name}:`, e.message);
     }
   }
 }

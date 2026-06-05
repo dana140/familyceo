@@ -1010,6 +1010,7 @@ app.post('/webhook', async (req, res) => {
 app.get('/auth/google', (req, res) => {
   const phone = normalisePhone(req.query.phone || '');
   if (!phone) return res.status(400).send('Missing phone parameter');
+  console.log(`🔑 /auth/google — CLIENT_ID: ${process.env.GOOGLE_CLIENT_ID ? process.env.GOOGLE_CLIENT_ID.slice(0, 8) + '...' : 'MISSING'}`);
   const client = createOAuthClient();
   const url = client.generateAuthUrl({
     access_type:   'offline',
@@ -1062,5 +1063,7 @@ migrate()
       console.log(`   POST http://localhost:${PORT}/webhook`);
       console.log(`   POST http://localhost:${PORT}/upload`);
       console.log(`   ⏰ Scheduler running — checking reminders every minute`);
+      console.log(`   GOOGLE_CLIENT_ID: ${process.env.GOOGLE_CLIENT_ID ? '✅ set (' + process.env.GOOGLE_CLIENT_ID.slice(0, 8) + '...)' : '❌ MISSING'}`);
+      console.log(`   GOOGLE_CLIENT_SECRET: ${process.env.GOOGLE_CLIENT_SECRET ? '✅ set' : '❌ MISSING'}`);
     });
   });

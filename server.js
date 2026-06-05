@@ -6,9 +6,20 @@ const twilio  = require('twilio');
 const cron    = require('node-cron');
 const Anthropic = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
+const { google }  = require('googleapis');
 const multer  = require('multer');
 const pdfParse = require('pdf-parse');
 const cors    = require('cors');
+
+const GOOGLE_REDIRECT_URI = 'https://familyceo-production.up.railway.app/auth/google/callback';
+
+function createOAuthClient() {
+  return new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI
+  );
+}
 
 const app = express();
 app.use(cors());
@@ -121,7 +132,7 @@ function formatNotes(notes) {
 }
 
 // ── System prompt builder ─────────────────────────────────────────────────────
-function buildSystemPrompt(profile) {
+function buildSystemPrompt(profile, gcalEvents = []) {
   if (!profile) {
     return `You are Family CEO — a personal AI assistant for a busy mum, available on WhatsApp.
 
@@ -182,7 +193,7 @@ HOUSEHOLD:
 - Cleaner: ${h.cleaner_name || 'not set'}${h.cleaner_day ? `, comes on ${h.cleaner_day}` : ''}
 - Bin day: ${h.bin_day || 'not set'}
 ${trades ? `Tradespeople:\n${trades}` : ''}
-${calendarSection}${notesSection}
+${calendarSection}${notesSection}${gcalEvents.length > 0 ? `\nGOOGLE CALENDAR — LIVE (treat as authoritative for scheduling questions):\n${gcalEvents.map(e => `  ${e.date} ${e.time !== 'All day' ? e.time : '(all day)'}: ${e.title}`).join('\n')}` : ''}
 EXTRA NOTES: ${p.extra_notes || 'none'}
 
 ━━━ HOW TO BEHAVE ━━━
@@ -357,7 +368,7 @@ function trimHistory(history) {
   return trimmed;
 }
 
-async function getClaudeReply(from, userMessage, profile) {
+async function getClaudeReply(from, userMessage, profile, gcalEvents = []) {
   if (!conversations[from]) conversations[from] = [];
   conversations[from].push({ role: 'user', content: userMessage });
 
@@ -366,7 +377,7 @@ async function getClaudeReply(from, userMessage, profile) {
   const response = await anthropic.messages.create({
     model:      'claude-sonnet-4-6',
     max_tokens: isLongMessage ? 800 : 400,
-    system:     buildSystemPrompt(profile),
+    system:     buildSystemPrompt(profile, gcalEvents),
     messages:   trimHistory(conversations[from]),
   });
 
@@ -379,6 +390,64 @@ function buildTwimlResponse(message) {
   const twiml = new twilio.twiml.MessagingResponse();
   twiml.message(message);
   return twiml.toString();
+}
+
+// ── Google Calendar ───────────────────────────────────────────────────────────
+async function getOAuthClientForUser(phoneNumber) {
+  const { data: row } = await supabase
+    .from('google_tokens')
+    .select('*')
+    .eq('phone_number', phoneNumber)
+    .maybeSingle();
+  if (!row) return null;
+
+  const client = createOAuthClient();
+  client.setCredentials({
+    access_token:  row.access_token,
+    refresh_token: row.refresh_token,
+    expiry_date:   row.expiry,
+  });
+  // Persist refreshed tokens automatically
+  client.on('tokens', async (tokens) => {
+    await supabase.from('google_tokens').update({
+      access_token: tokens.access_token,
+      ...(tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {}),
+      expiry: tokens.expiry_date,
+    }).eq('phone_number', phoneNumber);
+  });
+  return client;
+}
+
+async function getCalendarEvents(phoneNumber, days = 7) {
+  try {
+    const auth = await getOAuthClientForUser(phoneNumber);
+    if (!auth) return [];
+
+    const calendar = google.calendar({ version: 'v3', auth });
+    const now = new Date();
+    const end = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    const { data } = await calendar.events.list({
+      calendarId:  'primary',
+      timeMin:     now.toISOString(),
+      timeMax:     end.toISOString(),
+      singleEvents: true,
+      orderBy:     'startTime',
+      maxResults:  50,
+    });
+
+    return (data.items || []).map(e => ({
+      title:    e.summary || 'Untitled',
+      date:     (e.start.dateTime || e.start.date || '').slice(0, 10),
+      time:     e.start.dateTime
+        ? new Date(e.start.dateTime).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })
+        : 'All day',
+      calendar: 'Google Calendar',
+    }));
+  } catch (err) {
+    console.error('⚠️  Google Calendar fetch failed:', err.message);
+    return [];
+  }
 }
 
 // ── Outbound WhatsApp sender ──────────────────────────────────────────────────
@@ -432,6 +501,11 @@ async function generateBriefing(profile) {
     ? `\nCALENDAR EVENTS THIS WEEK:\n${upcomingEvents.map(e => `- ${e.date}: ${e.title}`).join('\n')}`
     : '';
 
+  const gcalEvents = await getCalendarEvents(profile.whatsapp_number, 7);
+  const gcalSection = gcalEvents.length > 0
+    ? `\nGOOGLE CALENDAR THIS WEEK:\n${gcalEvents.map(e => `- ${e.date} ${e.time !== 'All day' ? e.time : '(all day)'}: ${e.title}`).join('\n')}`
+    : '';
+
   const response = await anthropic.messages.create({
     model:      'claude-sonnet-4-6',
     max_tokens: 400,
@@ -448,7 +522,7 @@ Household:
 - Cleaner: ${h.cleaner_name || 'not set'}${h.cleaner_day ? `, comes on ${h.cleaner_day}` : ''}
 - Bin day: ${h.bin_day || 'not set'}
 ${trades ? `Tradespeople:\n${trades}` : ''}
-${calendarSection}${notesSection}
+${calendarSection}${notesSection}${gcalSection}
 Extra notes: ${p.extra_notes || 'none'}
 
 RULES:
@@ -917,7 +991,10 @@ app.post('/webhook', async (req, res) => {
       extractReminder(body, profile).catch(e => console.error('⚠️ Reminder extract error:', e.message));
     }
 
-    const reply = await getClaudeReply(from, body, profile);
+    // Fetch live Google Calendar events (returns [] if not connected or on error)
+    const gcalEvents = profile ? await getCalendarEvents(profile.whatsapp_number, 14) : [];
+
+    const reply = await getClaudeReply(from, body, profile, gcalEvents);
     console.log(`📤 Claude: ${reply}`);
 
     res.type('text/xml');
@@ -926,6 +1003,44 @@ app.post('/webhook', async (req, res) => {
     console.error('❌ Error:', err.message);
     res.type('text/xml');
     res.send(buildTwimlResponse("Sorry, I hit a snag. Try again in a moment!"));
+  }
+});
+
+// ── Google OAuth ──────────────────────────────────────────────────────────────
+app.get('/auth/google', (req, res) => {
+  const phone = normalisePhone(req.query.phone || '');
+  if (!phone) return res.status(400).send('Missing phone parameter');
+  const client = createOAuthClient();
+  const url = client.generateAuthUrl({
+    access_type: 'offline',
+    scope:       ['https://www.googleapis.com/auth/calendar.readonly'],
+    state:       phone,
+    prompt:      'consent', // always request refresh_token
+  });
+  res.redirect(url);
+});
+
+app.get('/auth/google/callback', async (req, res) => {
+  const { code, state: phone, error } = req.query;
+  if (error) return res.status(400).send(`Google auth error: ${error}`);
+  try {
+    const client = createOAuthClient();
+    const { tokens } = await client.getToken(code);
+    await supabase.from('google_tokens').upsert({
+      phone_number:  phone,
+      access_token:  tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expiry:        tokens.expiry_date,
+    }, { onConflict: 'phone_number' });
+    console.log(`✅ Google Calendar connected for ${phone}`);
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+      <style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f9fafb}
+      h2{color:#3a7d58}p{color:#555}</style></head><body>
+      <h2>✅ Google Calendar connected!</h2>
+      <p>You can close this tab and return to WhatsApp.</p></body></html>`);
+  } catch (err) {
+    console.error('❌ Google callback error:', err.message);
+    res.status(500).send('Authentication failed — please try again.');
   }
 });
 

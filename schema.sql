@@ -65,3 +65,17 @@ create table if not exists user_profiles (
 
 alter table user_profiles enable row level security;
 create policy "Allow all" on user_profiles for all using (true) with check (true);
+
+-- Google OAuth tokens
+create table if not exists google_tokens (
+  id           uuid        primary key default gen_random_uuid(),
+  phone_number text        unique not null,
+  access_token text        not null,
+  refresh_token text,
+  expiry       bigint,
+  created_at   timestamptz default now(),
+  updated_at   timestamptz default now()
+);
+
+alter table google_tokens enable row level security;
+create policy "Allow all" on google_tokens for all using (true) with check (true);

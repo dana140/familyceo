@@ -1183,6 +1183,26 @@ body {
              border-radius: var(--radius-lg); font-size: 14px; color: var(--green);
              line-height: 1.7; font-weight: 400;">
         </div>
+
+        <!-- Google Calendar connect -->
+        <div style="margin-top: 32px; padding-top: 28px; border-top: 1px solid var(--border);">
+          <p style="font-size: 12px; color: var(--ink-light); margin-bottom: 14px;
+                    letter-spacing: 0.04em;">Optional — connect your Google Calendar for live event sync</p>
+          <a id="gcalBtn" href="#" target="_blank"
+            style="display:inline-flex; align-items:center; gap:10px;
+                   background:#fff; border:1px solid var(--border); color:var(--ink-mid);
+                   padding:11px 22px; border-radius:var(--radius); font-size:12px;
+                   font-weight:500; letter-spacing:0.1em; text-transform:uppercase;
+                   text-decoration:none; font-family:'Jost',sans-serif;
+                   box-shadow:var(--shadow-sm); transition:all 0.15s;">
+            <svg width="16" height="16" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M24 4C12.95 4 4 12.95 4 24s8.95 20 20 20 20-8.95 20-20S35.05 4 24 4z" fill="#4285F4"/>
+              <path d="M33.5 24c0-5.25-4.25-9.5-9.5-9.5S14.5 18.75 14.5 24s4.25 9.5 9.5 9.5 9.5-4.25 9.5-9.5z" fill="#fff"/>
+              <path d="M24 19v5l4 2.5" stroke="#4285F4" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            Connect Google Calendar
+          </a>
+        </div>
       </div>
 
     </div>
@@ -1491,6 +1511,7 @@ async function saveProfile() {
     result.style.color = 'var(--green)';
     result.innerHTML = `<strong>You're all set!</strong> Now go back to WhatsApp and reply <strong>done</strong> to your Family Chief of Staff.`;
     result.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    updateGcalLink();
   } catch (err) {
     [bottomBtn, topBtn].forEach(b => { if (b) { b.disabled = false; b.textContent = 'Save My Profile'; } });
     result.style.display = 'block';
@@ -1540,6 +1561,7 @@ async function loadExistingProfile() {
     document.querySelector('.content').scrollIntoView({ behavior: 'smooth', block: 'start' });
     btn.textContent = 'Loaded ✓';
     updateProgress();
+    updateGcalLink();
   } catch (err) {
     btn.disabled = false;
     btn.textContent = 'Load My Profile';
@@ -1551,7 +1573,29 @@ async function loadExistingProfile() {
   }
 }
 
-window.addEventListener('load', () => {});
+function updateGcalLink() {
+  const phone = document.getElementById('ceoPhone')?.value.trim();
+  const btn   = document.getElementById('gcalBtn');
+  if (!btn) return;
+  if (phone) {
+    btn.href  = `https://familyceo-production.up.railway.app/auth/google?phone=${encodeURIComponent(phone)}`;
+    btn.style.opacity = '1';
+    btn.style.pointerEvents = 'auto';
+  } else {
+    btn.href  = '#';
+    btn.style.opacity = '0.4';
+    btn.style.pointerEvents = 'none';
+  }
+}
+
+// Keep gcal link in sync as phone number is typed
+document.addEventListener('DOMContentLoaded', () => {
+  const phoneInput = document.getElementById('ceoPhone');
+  if (phoneInput) phoneInput.addEventListener('input', updateGcalLink);
+  updateGcalLink();
+});
+
+window.addEventListener('load', () => { updateGcalLink(); });
 </script>
 </body>
 </html>

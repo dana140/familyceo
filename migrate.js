@@ -71,6 +71,22 @@ do $$ begin
   create policy "Allow all" on user_profiles for all using (true) with check (true);
 exception when duplicate_object then null;
 end $$;
+
+create table if not exists google_tokens (
+  id            uuid        primary key default gen_random_uuid(),
+  phone_number  text        unique not null,
+  access_token  text        not null,
+  refresh_token text,
+  expiry        bigint,
+  created_at    timestamptz default now(),
+  updated_at    timestamptz default now()
+);
+
+alter table google_tokens enable row level security;
+do $$ begin
+  create policy "Allow all" on google_tokens for all using (true) with check (true);
+exception when duplicate_object then null;
+end $$;
 `;
 
 async function migrate() {

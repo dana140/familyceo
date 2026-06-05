@@ -1577,15 +1577,9 @@ function updateGcalLink() {
   const phone = document.getElementById('ceoPhone')?.value.trim();
   const btn   = document.getElementById('gcalBtn');
   if (!btn) return;
-  if (phone) {
-    btn.href  = `https://familyceo-production.up.railway.app/auth/google?phone=${encodeURIComponent(phone)}`;
-    btn.style.opacity = '1';
-    btn.style.pointerEvents = 'auto';
-  } else {
-    btn.href  = '#';
-    btn.style.opacity = '0.4';
-    btn.style.pointerEvents = 'none';
-  }
+  btn.href = phone
+    ? `https://familyceo-production.up.railway.app/auth/google?phone=${encodeURIComponent(phone)}`
+    : 'https://familyceo-production.up.railway.app/auth/google';
 }
 
 // Keep gcal link in sync as phone number is typed

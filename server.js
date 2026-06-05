@@ -1012,10 +1012,11 @@ app.get('/auth/google', (req, res) => {
   if (!phone) return res.status(400).send('Missing phone parameter');
   const client = createOAuthClient();
   const url = client.generateAuthUrl({
-    access_type: 'offline',
-    scope:       ['https://www.googleapis.com/auth/calendar.readonly'],
-    state:       phone,
-    prompt:      'consent', // always request refresh_token
+    access_type:   'offline',
+    scope:         ['https://www.googleapis.com/auth/calendar.readonly'],
+    state:         phone,
+    prompt:        'consent',
+    redirect_uri:  GOOGLE_REDIRECT_URI,
   });
   res.redirect(url);
 });

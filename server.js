@@ -394,11 +394,13 @@ function buildTwimlResponse(message) {
 
 // ── Google Calendar ───────────────────────────────────────────────────────────
 async function getOAuthClientForUser(phoneNumber) {
+  const phone = phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber}`;
   const { data: row } = await supabase
     .from('google_tokens')
     .select('*')
-    .eq('phone_number', phoneNumber)
+    .eq('phone_number', phone)
     .maybeSingle();
+  console.log('TOKEN LOOKUP:', phone, 'found:', !!row);
   if (!row) return null;
 
   const client = createOAuthClient();
@@ -413,8 +415,14 @@ async function getOAuthClientForUser(phoneNumber) {
       access_token: tokens.access_token,
       ...(tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {}),
       expiry: tokens.expiry_date,
-    }).eq('phone_number', phoneNumber);
+    }).eq('phone_number', phone);
   });
+  try {
+    await client.getAccessToken();
+  } catch (err) {
+    console.log('getAccessToken failed:', err.message, err.response?.data?.error, err.response?.data?.error_description);
+    return null;
+  }
   return client;
 }
 
@@ -453,7 +461,7 @@ async function getCalendarEvents(phoneNumber, days = 7) {
 async function getImportantEmails(phoneNumber) {
   try {
     const auth = await getOAuthClientForUser(phoneNumber);
-    if (!auth) return [];
+    if (!auth) return null;
 
     const gmail = google.gmail({ version: 'v1', auth });
     const since = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
@@ -463,6 +471,7 @@ async function getImportantEmails(phoneNumber) {
       q:        `is:unread after:${since}`,
       maxResults: 20,
     }).catch(err => {
+      console.log('Gmail API error detail:', err.message, err.code, JSON.stringify(err.errors));
       if (err.code === 401 || err.code === 403) throw Object.assign(err, { isAuthError: true });
       throw err;
     });
@@ -565,7 +574,11 @@ async function generateBriefing(profile) {
   let gmailSection = '';
   try {
     const importantEmails = await getImportantEmails(profile.whatsapp_number);
-    if (importantEmails.length > 0) {
+    if (importantEmails === null) {
+      gmailSection = '\n📧 Gmail: Not connected — visit https://familyceo.netlify.app to connect your Google account.';
+    } else if (importantEmails.length === 0) {
+      gmailSection = '\n📧 Gmail: No unread emails in the last 24 hours.';
+    } else {
       gmailSection = `\nIMPORTANT EMAILS (unread, last 24h):\n${importantEmails.map(e => `- From: ${e.from} | Subject: ${e.subject}`).join('\n')}`;
     }
   } catch (e) {
@@ -1134,9 +1147,10 @@ app.get('/auth/google', (req, res) => {
 });
 
 app.get('/auth/google/callback', async (req, res) => {
-  const { code, state: phone, error } = req.query;
+  const { code, state: rawPhone, error } = req.query;
   if (error) return res.status(400).send(`Google auth error: ${error}`);
   try {
+    const phone = rawPhone && !rawPhone.startsWith('+') ? `+${rawPhone}` : rawPhone;
     const client = createOAuthClient();
     const { tokens } = await client.getToken(code);
     await supabase.from('google_tokens').upsert({

@@ -1585,6 +1585,9 @@ function updateGcalLink() {
 // Keep gcal link in sync as phone number is typed
 document.addEventListener('DOMContentLoaded', () => {
   const phoneInput = document.getElementById('ceoPhone');
+  // Seed input from URL ?phone= param so the button is ready before any typing
+  const urlPhone = new URLSearchParams(window.location.search).get('phone');
+  if (urlPhone && phoneInput && !phoneInput.value) phoneInput.value = urlPhone;
   if (phoneInput) phoneInput.addEventListener('input', updateGcalLink);
   updateGcalLink();
 });

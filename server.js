@@ -450,6 +450,62 @@ async function getCalendarEvents(phoneNumber, days = 7) {
   }
 }
 
+async function getImportantEmails(phoneNumber) {
+  try {
+    const auth = await getOAuthClientForUser(phoneNumber);
+    if (!auth) return [];
+
+    const gmail = google.gmail({ version: 'v1', auth });
+    const since = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
+
+    const list = await gmail.users.messages.list({
+      userId:   'me',
+      q:        `is:unread after:${since}`,
+      maxResults: 20,
+    }).catch(err => {
+      if (err.code === 401 || err.code === 403) throw Object.assign(err, { isAuthError: true });
+      throw err;
+    });
+
+    const messages = list.data.messages || [];
+    if (!messages.length) return [];
+
+    const emails = await Promise.all(messages.map(async ({ id }) => {
+      const msg = await gmail.users.messages.get({
+        userId: 'me', id, format: 'metadata',
+        metadataHeaders: ['From', 'Subject', 'Date'],
+      });
+      const headers = msg.data.payload?.headers || [];
+      const get = name => headers.find(h => h.name === name)?.value || '';
+      return {
+        from:     get('From'),
+        subject:  get('Subject'),
+        snippet:  msg.data.snippet || '',
+        received: get('Date'),
+      };
+    }));
+
+    const result = await anthropic.messages.create({
+      model:      'claude-haiku-4-5-20251001',
+      max_tokens: 1000,
+      messages: [{
+        role: 'user',
+        content: `You are a chief of staff for a busy mum. Here are her unread emails from the last 24 hours. Return ONLY the ones she genuinely needs to know about — school emails, medical, urgent requests, emails from real people she knows. Ignore newsletters, marketing, social notifications, and automated emails. Return as JSON array: [{from, subject, snippet, received}]. Return empty array if nothing important.\n\nEmails:\n${JSON.stringify(emails, null, 2)}`,
+      }],
+    });
+
+    const raw = result.content[0].text.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+    return JSON.parse(raw);
+  } catch (err) {
+    if (err.isAuthError) {
+      console.error(`⚠️  Gmail auth error for ${phoneNumber} — tokens need refresh`);
+      throw Object.assign(err, { isAuthError: true });
+    }
+    console.error('⚠️  Gmail fetch failed:', err.message);
+    return [];
+  }
+}
+
 // ── Outbound WhatsApp sender ──────────────────────────────────────────────────
 async function sendWhatsApp(to, body) {
   const recipient = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
@@ -506,6 +562,16 @@ async function generateBriefing(profile) {
     ? `\nGOOGLE CALENDAR THIS WEEK:\n${gcalEvents.map(e => `- ${e.date} ${e.time !== 'All day' ? e.time : '(all day)'}: ${e.title}`).join('\n')}`
     : '';
 
+  let gmailSection = '';
+  try {
+    const importantEmails = await getImportantEmails(profile.whatsapp_number);
+    if (importantEmails.length > 0) {
+      gmailSection = `\nIMPORTANT EMAILS (unread, last 24h):\n${importantEmails.map(e => `- From: ${e.from} | Subject: ${e.subject}`).join('\n')}`;
+    }
+  } catch (e) {
+    if (!e.isAuthError) console.error('⚠️  Gmail fetch failed in briefing:', e.message);
+  }
+
   const response = await anthropic.messages.create({
     model:      'claude-sonnet-4-6',
     max_tokens: 400,
@@ -522,7 +588,7 @@ Household:
 - Cleaner: ${h.cleaner_name || 'not set'}${h.cleaner_day ? `, comes on ${h.cleaner_day}` : ''}
 - Bin day: ${h.bin_day || 'not set'}
 ${trades ? `Tradespeople:\n${trades}` : ''}
-${calendarSection}${notesSection}${gcalSection}
+${calendarSection}${notesSection}${gcalSection}${gmailSection}
 Extra notes: ${p.extra_notes || 'none'}
 
 RULES:
@@ -1014,6 +1080,28 @@ app.post('/webhook', async (req, res) => {
     // Fetch live Google Calendar events (returns [] if not connected or on error)
     const gcalEvents = profile ? await getCalendarEvents(profile.whatsapp_number, 14) : [];
 
+    // Detect email-check queries and inject important emails into the message
+    const emailQueryPattern = /\b(check|show|any|what('?s| is| are)?|got|have i got|read)\b.*\b(email|emails|inbox|mail)\b/i;
+    if (profile && emailQueryPattern.test(body)) {
+      try {
+        const importantEmails = await getImportantEmails(profile.whatsapp_number);
+        if (importantEmails.length > 0) {
+          const emailContext = importantEmails.map(e =>
+            `From: ${e.from}\nSubject: ${e.subject}\nSnippet: ${e.snippet}`
+          ).join('\n\n');
+          body = `${body}\n\n[GMAIL — important unread emails from last 24h:\n${emailContext}]`;
+        } else {
+          body = `${body}\n\n[GMAIL — no important unread emails in the last 24 hours]`;
+        }
+      } catch (e) {
+        if (e.isAuthError) {
+          body = `${body}\n\n[GMAIL — unable to access emails: Google account needs to be reconnected at https://familyceo.netlify.app]`;
+        } else {
+          console.error('⚠️  Gmail fetch error in webhook:', e.message);
+        }
+      }
+    }
+
     const reply = await getClaudeReply(from, body, profile, gcalEvents);
     console.log(`📤 Claude: ${reply}`);
 
@@ -1034,7 +1122,10 @@ app.get('/auth/google', (req, res) => {
   const client = createOAuthClient();
   const url = client.generateAuthUrl({
     access_type:   'offline',
-    scope:         ['https://www.googleapis.com/auth/calendar.readonly'],
+    scope: [
+      'https://www.googleapis.com/auth/calendar.readonly',
+      'https://www.googleapis.com/auth/gmail.readonly',
+    ],
     state:         phone,
     prompt:        'consent',
     redirect_uri:  GOOGLE_REDIRECT_URI,
@@ -1058,7 +1149,7 @@ app.get('/auth/google/callback', async (req, res) => {
     res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8">
       <style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f9fafb}
       h2{color:#3a7d58}p{color:#555}</style></head><body>
-      <h2>✅ Google Calendar connected!</h2>
+      <h2>✅ Google Calendar & Gmail connected!</h2>
       <p>You can close this tab and return to WhatsApp.</p></body></html>`);
   } catch (err) {
     console.error('❌ Google callback error:', err.message);

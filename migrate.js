@@ -94,7 +94,7 @@ async function migrate() {
   await client.connect();
   try {
     await client.query(SQL);
-    console.log('✅ Migrations applied (user_profiles recreated with correct schema)');
+    console.log('✅ Migrations applied (idempotent — create-if-not-exists and add-column-if-not-exists only; no data is dropped)');
   } finally {
     await client.end();
   }

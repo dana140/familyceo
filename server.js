@@ -11,6 +11,10 @@ const multer  = require('multer');
 const pdfParse = require('pdf-parse');
 const cors    = require('cors');
 
+// How many recent minutes the scheduler will still fire a missed reminder for.
+// Duplicate sends are prevented by the last_sent_at check, not by this width.
+const CATCHUP_WINDOW_MINUTES = 3;
+
 const GOOGLE_REDIRECT_URI = 'https://familyceo-production.up.railway.app/auth/google/callback';
 
 function createOAuthClient() {
@@ -44,6 +48,47 @@ function normalisePhone(raw) {
     .replace(/^0(\d{10})$/, '+44$1'); // 07XXXXXXXXXX → +447XXXXXXXXXX (UK)
   if (!n.startsWith('+')) n = `+${n}`;
   return n; // stored format is +447... — no whatsapp: prefix
+}
+
+// ── Schedule time normaliser ──────────────────────────────────────────────────
+// schedule_time is free text written from an LLM response, but the scheduler
+// matches it as an exact string. Anything that isn't zero-padded HH:MM would
+// silently never fire, so normalise here and reject what can't be salvaged.
+// Accepts "9:30", "09:30", "9.30", "09:30:00", "0930". Returns null if invalid.
+function normaliseScheduleTime(raw) {
+  const s = String(raw ?? '').trim().replace(/\./g, ':');
+  const m = s.match(/^(\d{1,2}):?(\d{2})(?::\d{2})?$/);
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isInteger(hh) || !Number.isInteger(mm)) return null;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
+// Every HH:MM string in the last `minutes` minutes, newest first — the
+// scheduler's catch-up window.
+//
+// Minutes belonging to the *previous* London day are deliberately excluded.
+// The duplicate guard below is day-level (last_sent_at's London date vs today),
+// so without this a daily 23:59 reminder sent last night would match the 23:59
+// still sitting in the window at 00:01 and fire a second time. The cost is that
+// a reminder in the last minutes before midnight isn't caught up across the
+// boundary — much better than double-messaging someone at midnight.
+function recentClockStrings(now, minutes) {
+  const fmtTime = d => d.toLocaleTimeString('en-GB', {
+    timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const fmtDate = d => d.toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+
+  const today = fmtDate(now);
+  const out = [];
+  for (let i = 0; i < minutes; i++) {
+    const t = new Date(now.getTime() - i * 60 * 1000);
+    if (fmtDate(t) !== today) break; // crossed midnight — stop here
+    out.push(fmtTime(t));
+  }
+  return [...new Set(out)];
 }
 
 // ── Profile loader ────────────────────────────────────────────────────────────
@@ -320,15 +365,17 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
   });
 
   let parsed;
+  const raw = extraction.content[0].text.trim();
   try {
-    const raw = extraction.content[0].text.trim();
     const jsonStr = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
     parsed = JSON.parse(jsonStr);
-  } catch {
+  } catch (e) {
+    console.error(`❌ Note extraction returned unparseable JSON for ${number}: ${e.message}`);
+    console.error(`   Raw model output was: ${raw.slice(0, 500)}`);
     return;
   }
 
-  if (!parsed.has_new_info || parsed.notes.length === 0) return;
+  if (!parsed.has_new_info || !parsed.notes?.length) return;
 
   // Load existing notes and merge
   const { data } = await supabase
@@ -344,10 +391,16 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
   }));
 
-  await supabase
+  const { error: notesErr } = await supabase
     .from('profiles')
     .update({ notes: [...existing, ...newNotes] })
     .eq('whatsapp_number', number);
+
+  if (notesErr) {
+    console.error(`❌ Note UPDATE FAILED for ${number}: ${notesErr.message}`);
+    console.error(`   Would have saved: ${newNotes.map(n => n.title).join(', ')}`);
+    return;
+  }
 
   console.log(`💾 Saved ${newNotes.length} note(s) for ${profile.mum_name}:`, newNotes.map(n => n.title).join(', '));
 }
@@ -517,7 +570,9 @@ async function getImportantEmails(phoneNumber) {
 
 // ── Outbound WhatsApp sender ──────────────────────────────────────────────────
 async function sendWhatsApp(to, body) {
-  const recipient = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
+  // Normalise at the outbound boundary too — Twilio rejects anything that
+  // isn't E.164, and a non-normalised stored number used to fail silently here.
+  const recipient = `whatsapp:${normalisePhone(to)}`;
   await twilioClient.messages.create({
     from: process.env.TWILIO_SANDBOX,
     to:   recipient,
@@ -675,28 +730,48 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
   });
 
   let parsed;
+  const raw = result.content[0].text.trim();
   try {
-    const raw     = result.content[0].text.trim();
     const jsonStr = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
     parsed = JSON.parse(jsonStr);
-  } catch {
+  } catch (e) {
+    console.error(`❌ Reminder extraction returned unparseable JSON for ${profile.whatsapp_number}: ${e.message}`);
+    console.error(`   Raw model output was: ${raw.slice(0, 500)}`);
     return;
   }
 
-  if (!parsed.has_reminder || !parsed.reminders.length) return;
+  if (!parsed.has_reminder || !parsed.reminders?.length) {
+    console.log(`   No reminder detected in message from ${profile.whatsapp_number}`);
+    return;
+  }
 
   for (const r of parsed.reminders) {
+    const scheduleTime = normaliseScheduleTime(r.schedule_time);
+    if (!scheduleTime) {
+      console.error(`❌ Reminder DROPPED for ${profile.whatsapp_number} — unusable schedule_time ${JSON.stringify(r.schedule_time)}`);
+      console.error(`   Context was: "${r.context}"`);
+      continue;
+    }
+
     const { error } = await supabase.from('reminders').insert({
       whatsapp_number: profile.whatsapp_number,
       context:         r.context,
       type:            'reminder',
-      schedule_time:   r.schedule_time,
+      schedule_time:   scheduleTime,
       frequency:       r.frequency || 'once',
       start_date:      r.start_date || today,
       end_date:        r.end_date   || null,
       active:          true,
     });
-    if (!error) console.log(`⏰ Reminder saved: "${r.context}" at ${r.schedule_time} (${r.frequency})`);
+
+    if (error) {
+      console.error(`❌ Reminder INSERT FAILED for ${profile.whatsapp_number}: ${error.message}`);
+      console.error(`   Payload: ${JSON.stringify({ context: r.context, schedule_time: scheduleTime, frequency: r.frequency || 'once', start_date: r.start_date || today, end_date: r.end_date || null })}`);
+      if (error.details) console.error(`   Details: ${error.details}`);
+      if (error.hint)    console.error(`   Hint: ${error.hint}`);
+    } else {
+      console.log(`⏰ Reminder saved: "${r.context}" at ${scheduleTime} (${r.frequency || 'once'}) for ${profile.whatsapp_number}`);
+    }
   }
 }
 
@@ -713,18 +788,25 @@ async function runScheduler() {
   console.log(`⏰ Scheduler tick — ${timeStr} (${todayISO}, day=${dayOfWeek})`);
 
   // ── 1. User reminders ──────────────────────────────────────────────────────
+  // Match a window of recent minutes, not just this exact one: a redeploy or a
+  // blocked event loop spanning a reminder's minute used to lose it forever.
+  // The last_sent_at check below is what prevents the window causing duplicates.
+  const clockWindow = recentClockStrings(now, CATCHUP_WINDOW_MINUTES);
+
   const { data: reminders, error: remErr } = await supabase
     .from('reminders')
     .select('*')
     .eq('active', true)
     .eq('type', 'reminder')
-    .eq('schedule_time', timeStr)
-    .lte('start_date', todayISO);
+    .in('schedule_time', clockWindow)
+    // start_date IS NULL must still fire — in Postgres `null <= date` is NULL,
+    // not true, so a bare .lte() silently excluded those rows forever.
+    .or(`start_date.is.null,start_date.lte.${todayISO}`);
 
   if (remErr) {
     console.error('⚠️  Reminders query error:', remErr.message);
   } else {
-    console.log(`   Reminders matching ${timeStr}: ${reminders?.length ?? 0}`);
+    console.log(`   Reminders matching window [${clockWindow.join(', ')}]: ${reminders?.length ?? 0}`);
   }
 
   for (const r of (reminders || [])) {
@@ -736,6 +818,19 @@ async function runScheduler() {
     if (r.frequency === 'weekdays' && (dayOfWeek === 0 || dayOfWeek === 6)) {
       console.log(`   ↳ Skipping ${r.id} — weekdays only, today is day ${dayOfWeek}`);
       continue;
+    }
+    // 'weekly' has no day column, so the weekday is anchored to start_date.
+    // Without this a weekly reminder fired every single day.
+    if (r.frequency === 'weekly') {
+      if (!r.start_date) {
+        console.error(`   ↳ Skipping ${r.id} — frequency 'weekly' but no start_date to anchor the weekday to`);
+        continue;
+      }
+      const anchorDay = new Date(`${r.start_date}T12:00:00Z`).getUTCDay();
+      if (anchorDay !== dayOfWeek) {
+        console.log(`   ↳ Skipping ${r.id} — weekly on day ${anchorDay}, today is day ${dayOfWeek}`);
+        continue;
+      }
     }
     if (r.last_sent_at && new Date(r.last_sent_at).toLocaleDateString('en-CA', { timeZone: 'Europe/London' }) === todayISO) {
       console.log(`   ↳ Skipping ${r.id} — already sent today (last_sent_at: ${r.last_sent_at})`);
@@ -842,11 +937,11 @@ async function extractTextFromImage(buffer, contentType) {
 
 // ── PDF upload & event extraction ─────────────────────────────────────────────
 app.post('/upload', upload.single('file'), async (req, res) => {
-  const { whatsapp_number } = req.body;
-
-  if (!req.file || !whatsapp_number) {
+  if (!req.file || !req.body.whatsapp_number) {
     return res.status(400).json({ error: 'Missing file or whatsapp_number' });
   }
+
+  const whatsapp_number = normalisePhone(req.body.whatsapp_number);
 
   try {
     console.log(`📄 Processing ${req.file.originalname} for ${whatsapp_number}`);
@@ -1088,6 +1183,13 @@ app.post('/webhook', async (req, res) => {
     if (profile) {
       extractAndSave(body, profile).catch(e => console.error('⚠️ Extract error:', e.message));
       extractReminder(body, profile).catch(e => console.error('⚠️ Reminder extract error:', e.message));
+    } else {
+      // No profile means reminders are never even attempted — make that loud, and
+      // print both forms of the number so a normalisation mismatch is obvious.
+      console.error(`❌ Reminder + note extraction SKIPPED — no profile matched.`);
+      console.error(`   Inbound number: ${JSON.stringify(from)}`);
+      console.error(`   Normalised to:  ${JSON.stringify(normalisePhone(from))} — no profiles row has this whatsapp_number.`);
+      console.error(`   Any reminder in this message has been lost. Fix the profile's stored number.`);
     }
 
     // Fetch live Google Calendar events (returns [] if not connected or on error)

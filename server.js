@@ -91,6 +91,45 @@ function recentClockStrings(now, minutes) {
   return [...new Set(out)];
 }
 
+// ── Model JSON parser ─────────────────────────────────────────────────────────
+// The models reliably return JSON but not reliably ONLY JSON — a fenced block is
+// often followed by a sentence of explanation, which defeats an end-anchored
+// fence strip and throws away a perfectly good reminder. Take the first fenced
+// block if there is one, otherwise scan for the first balanced {...} or [...],
+// tracking string state so braces inside values don't end it early.
+function parseModelJson(raw) {
+  const text = String(raw ?? '');
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidate = fenced ? fenced[1] : text;
+
+  // Whichever of { or [ comes first is the start of the value we want.
+  const objAt = candidate.indexOf('{');
+  const arrAt = candidate.indexOf('[');
+  const start = (objAt === -1) ? arrAt : (arrAt === -1) ? objAt : Math.min(objAt, arrAt);
+  if (start === -1) throw new SyntaxError('no JSON value found in model output');
+
+  const open  = candidate[start];
+  const close = open === '{' ? '}' : ']';
+
+  let depth = 0, inString = false, escaped = false;
+  for (let i = start; i < candidate.length; i++) {
+    const c = candidate[i];
+    if (inString) {
+      if (escaped)          escaped = false;
+      else if (c === '\\')  escaped = true;
+      else if (c === '"')   inString = false;
+      continue;
+    }
+    if      (c === '"')   inString = true;
+    else if (c === open)  depth++;
+    else if (c === close) {
+      depth--;
+      if (depth === 0) return JSON.parse(candidate.slice(start, i + 1));
+    }
+  }
+  throw new SyntaxError('unterminated JSON value in model output');
+}
+
 // ── Profile loader ────────────────────────────────────────────────────────────
 async function loadProfile(whatsappNumber) {
   const normalised = normalisePhone(whatsappNumber);
@@ -241,6 +280,18 @@ ${trades ? `Tradespeople:\n${trades}` : ''}
 ${calendarSection}${notesSection}${gcalEvents.length > 0 ? `\nGOOGLE CALENDAR — LIVE (treat as authoritative for scheduling questions):\n${gcalEvents.map(e => `  ${e.date} ${e.time !== 'All day' ? e.time : '(all day)'}: ${e.title}`).join('\n')}` : ''}
 EXTRA NOTES: ${p.extra_notes || 'none'}
 
+━━━ WHAT YOU CAN ACTUALLY DO ━━━
+You CAN send messages on your own, without her messaging you first. This is real, not aspirational:
+- REMINDERS: when she asks to be reminded of something, it is saved to a database and a scheduler
+  running every minute delivers it to her on WhatsApp at the time she asked for. She will receive
+  it even though she is not in a conversation with you at that moment.
+- MORNING BRIEFING: you message her automatically every day at ${p.briefing_time || '07:30'}.
+
+NEVER tell her you are unable to send proactive messages, that you can only respond when she
+messages you, or that she should set an alarm on her phone instead. All of that is false, and
+telling her so denies her a core feature she is paying for. If she asks whether you will really
+message her at the time — the answer is yes.
+
 ━━━ HOW TO BEHAVE ━━━
 COMMUNICATION STYLE: ${style}
 
@@ -255,9 +306,15 @@ COMMUNICATION STYLE: ${style}
 - Never say you "can't" do something — find the best version of help you can offer.
 
 MEMORY & SAVING:
-- When the user tells you something new about her family — a one-off event, a schedule change, a new contact, a reminder — acknowledge it naturally in your reply with a short confirmation like "Got it — noted Ellie's school trip on Tuesday" or "Saved — I've updated Lexie's activities."
+- Saving runs as a separate background step AFTER your reply is written. You never see whether it
+  succeeded, so you are not in a position to report that it did.
+- Confirm the INTENT, never a completed write. Say "I'll set that for 18:28" or "Noting Ellie's
+  school trip on Tuesday" — NOT "Saved!", "Done", or "I've updated it", which claim knowledge you
+  do not have and mislead her when the write fails.
 - Do this for: upcoming events, schedule changes, new tradespeople, reminders, anything that sounds like it should be remembered.
-- Keep the confirmation brief — one line at the end of your reply is enough.`;
+- Keep the confirmation brief — one line at the end of your reply is enough.
+- If she corrects something she just told you ("sorry, I meant 18:28"), restate the corrected
+  version back to her so it is unambiguous which version you are acting on.`;
 }
 
 // ── Onboarding ────────────────────────────────────────────────────────────────
@@ -367,8 +424,7 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
   let parsed;
   const raw = extraction.content[0].text.trim();
   try {
-    const jsonStr = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-    parsed = JSON.parse(jsonStr);
+    parsed = parseModelJson(raw);
   } catch (e) {
     console.error(`❌ Note extraction returned unparseable JSON for ${number}: ${e.message}`);
     console.error(`   Raw model output was: ${raw.slice(0, 500)}`);
@@ -556,8 +612,7 @@ async function getImportantEmails(phoneNumber) {
       }],
     });
 
-    const raw = result.content[0].text.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-    return JSON.parse(raw);
+    return parseModelJson(result.content[0].text);
   } catch (err) {
     if (err.isAuthError) {
       console.error(`⚠️  Gmail auth error for ${phoneNumber} — tokens need refresh`);
@@ -688,7 +743,11 @@ async function generateReminderContent(reminder, profile) {
 }
 
 // ── Reminder extractor ────────────────────────────────────────────────────────
-async function extractReminder(message, profile) {
+// `history` is the conversation so far (excluding the current message). Without it
+// a correction like "sorry I meant 18:28" carries no reminder on its own, so the
+// extractor found nothing and silently did nothing — while the chat model, which
+// DOES have history, told the user it had been updated.
+async function extractReminder(message, profile, history = []) {
   const now    = new Date();
   const today  = now.toISOString().split('T')[0];
   const dayName = now.toLocaleDateString('en-GB', { weekday: 'long' });
@@ -698,22 +757,62 @@ async function extractReminder(message, profile) {
   thisSunday.setDate(now.getDate() + daysToSun);
   const thisSundayISO = thisSunday.toISOString().split('T')[0];
 
+  // Existing reminders are the only valid targets for an update. Loading them here
+  // (rather than trusting an id from the model) is what stops a hallucinated or
+  // someone else's id being written to.
+  const { data: existing, error: exErr } = await supabase
+    .from('reminders')
+    .select('id, context, schedule_time, frequency, start_date, end_date')
+    .eq('whatsapp_number', profile.whatsapp_number)
+    .eq('type', 'reminder')
+    .eq('active', true)
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  if (exErr) console.error(`⚠️  Could not load existing reminders for ${profile.whatsapp_number}: ${exErr.message}`);
+
+  const existingById = new Map((existing || []).map(r => [r.id, r]));
+  const existingBlock = (existing || []).length
+    ? (existing || []).map(r => `- id ${r.id} | "${r.context}" at ${r.schedule_time} (${r.frequency}, from ${r.start_date}${r.end_date ? ` to ${r.end_date}` : ''})`).join('\n')
+    : '(none)';
+
+  const historyBlock = (history || [])
+    .slice(-6)
+    .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${typeof m.content === 'string' ? m.content : '[non-text]'}`)
+    .join('\n') || '(no earlier messages)';
+
   const result = await anthropic.messages.create({
     model:      'claude-haiku-4-5-20251001',
-    max_tokens: 500,
+    max_tokens: 700,
     messages: [{
       role: 'user',
       content: `Today is ${today} (${dayName}). This Sunday is ${thisSundayISO}.
-User message: "${message}"
 
-Does this ask to be reminded or sent something at a specific time?
-Look for: "remind me", "send me", "every day", "at Xpm/am", "each morning", "this week", etc.
+RECENT CONVERSATION (for context — do NOT re-create reminders already handled here):
+${historyBlock}
 
-Return ONLY valid JSON:
+THE USER'S CURRENT ACTIVE REMINDERS:
+${existingBlock}
+
+NEW USER MESSAGE: "${message}"
+
+Decide what the NEW USER MESSAGE means for the user's reminders.
+
+- If it asks for a new reminder → action "create".
+- If it CORRECTS or CHANGES a reminder from the recent conversation or the active list
+  (e.g. "sorry I meant 18:28", "actually make it 7pm", "change that to tomorrow")
+  → action "update", and set "id" to the id of the reminder it is changing.
+  Prefer the most recently created reminder when the correction is ambiguous.
+- If it asks to cancel/stop a reminder → action "cancel" with the "id".
+- If it is not about reminders at all → return has_reminder false.
+
+Return ONLY valid JSON, no commentary before or after:
 {
   "has_reminder": true or false,
   "reminders": [
     {
+      "action": "create" | "update" | "cancel",
+      "id": "existing reminder id — required for update and cancel, null for create",
       "context": "what to generate/send — be specific, e.g. 'a short maths exercise for Ellie about Time'",
       "schedule_time": "HH:MM in 24h",
       "frequency": "once | daily | weekdays | weekly",
@@ -725,6 +824,7 @@ Return ONLY valid JSON:
 Resolve all relative dates using today's date.
 "This week" means start today, end ${thisSundayISO}.
 If no end date implied: end_date is null.
+For an update, carry over any field the user did not change from the existing reminder.
 If no reminder found: {"has_reminder": false, "reminders": []}`,
     }],
   });
@@ -732,8 +832,7 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
   let parsed;
   const raw = result.content[0].text.trim();
   try {
-    const jsonStr = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-    parsed = JSON.parse(jsonStr);
+    parsed = parseModelJson(raw);
   } catch (e) {
     console.error(`❌ Reminder extraction returned unparseable JSON for ${profile.whatsapp_number}: ${e.message}`);
     console.error(`   Raw model output was: ${raw.slice(0, 500)}`);
@@ -746,13 +845,58 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
   }
 
   for (const r of parsed.reminders) {
-    const scheduleTime = normaliseScheduleTime(r.schedule_time);
-    if (!scheduleTime) {
-      console.error(`❌ Reminder DROPPED for ${profile.whatsapp_number} — unusable schedule_time ${JSON.stringify(r.schedule_time)}`);
-      console.error(`   Context was: "${r.context}"`);
+    const action = (r.action || 'create').toLowerCase();
+
+    // ── cancel ──────────────────────────────────────────────────────────────
+    if (action === 'cancel') {
+      if (!existingById.has(r.id)) {
+        console.error(`❌ Reminder CANCEL IGNORED for ${profile.whatsapp_number} — id ${JSON.stringify(r.id)} is not one of this user's active reminders`);
+        continue;
+      }
+      const { error } = await supabase.from('reminders').update({ active: false }).eq('id', r.id);
+      if (error) console.error(`❌ Reminder CANCEL FAILED for ${profile.whatsapp_number}: ${error.message}`);
+      else       console.log(`⏰ Reminder cancelled: ${r.id} ("${existingById.get(r.id).context}") for ${profile.whatsapp_number}`);
       continue;
     }
 
+    const scheduleTime = normaliseScheduleTime(r.schedule_time);
+    if (!scheduleTime) {
+      console.error(`❌ Reminder DROPPED for ${profile.whatsapp_number} — unusable schedule_time ${JSON.stringify(r.schedule_time)}`);
+      console.error(`   Action was "${action}", context "${r.context}"`);
+      continue;
+    }
+
+    // ── update ──────────────────────────────────────────────────────────────
+    if (action === 'update') {
+      if (!existingById.has(r.id)) {
+        console.error(`❌ Reminder UPDATE fell back to INSERT for ${profile.whatsapp_number} — id ${JSON.stringify(r.id)} is not one of this user's active reminders`);
+      } else {
+        const prev = existingById.get(r.id);
+        const patch = {
+          context:       r.context       || prev.context,
+          schedule_time: scheduleTime,
+          frequency:     r.frequency     || prev.frequency,
+          start_date:    r.start_date    || prev.start_date,
+          end_date:      r.end_date ?? prev.end_date,
+          // A correction must be able to fire again today, so clear the
+          // day-level duplicate guard that would otherwise suppress it.
+          last_sent_at:  null,
+          active:        true,
+        };
+        const { error } = await supabase.from('reminders').update(patch).eq('id', r.id);
+        if (error) {
+          console.error(`❌ Reminder UPDATE FAILED for ${profile.whatsapp_number}: ${error.message}`);
+          console.error(`   id ${r.id}, patch: ${JSON.stringify(patch)}`);
+          if (error.details) console.error(`   Details: ${error.details}`);
+          if (error.hint)    console.error(`   Hint: ${error.hint}`);
+        } else {
+          console.log(`⏰ Reminder updated: ${r.id} — "${prev.context}" at ${prev.schedule_time} → "${patch.context}" at ${patch.schedule_time} (${patch.frequency}) for ${profile.whatsapp_number}`);
+        }
+        continue;
+      }
+    }
+
+    // ── create (and update fallback) ────────────────────────────────────────
     const { error } = await supabase.from('reminders').insert({
       whatsapp_number: profile.whatsapp_number,
       context:         r.context,
@@ -1182,7 +1326,9 @@ app.post('/webhook', async (req, res) => {
     // Fire extraction + reminder detection in background — never delay the Twilio response
     if (profile) {
       extractAndSave(body, profile).catch(e => console.error('⚠️ Extract error:', e.message));
-      extractReminder(body, profile).catch(e => console.error('⚠️ Reminder extract error:', e.message));
+      // conversations[from] holds prior turns only — getClaudeReply appends the
+      // current message later — so pass `body` separately as the new message.
+      extractReminder(body, profile, conversations[from] || []).catch(e => console.error('⚠️ Reminder extract error:', e.message));
     } else {
       // No profile means reminders are never even attempted — make that loud, and
       // print both forms of the number so a normalisation mismatch is obvious.

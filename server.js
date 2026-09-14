@@ -1429,7 +1429,18 @@ cron.schedule('* * * * *', () => {
 const PORT = process.env.PORT || 3000;
 
 migrate()
-  .catch(e => console.error('⚠️  Migration skipped (no DATABASE_URL?):', e.message))
+  .catch(e => {
+    // Distinguish "not configured" from "ran and failed" — the old message
+    // blamed a missing DATABASE_URL for every failure, including real SQL errors.
+    if (!process.env.DATABASE_URL) {
+      console.warn('⚠️  Migration skipped — DATABASE_URL is not set.');
+    } else {
+      console.error('❌ MIGRATION FAILED — the schema may be out of date:', e.message);
+      if (e.code)   console.error(`   Postgres code: ${e.code}`);
+      if (e.detail) console.error(`   Detail: ${e.detail}`);
+      if (e.where)  console.error(`   Where: ${e.where}`);
+    }
+  })
   .finally(() => {
     app.listen(PORT, () => {
       console.log(`✅ Family CEO webhook server running on port ${PORT}`);

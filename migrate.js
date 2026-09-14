@@ -57,13 +57,38 @@ alter table user_profiles add column if not exists onboarding_step int   not nul
 alter table user_profiles add column if not exists onboarded_at    timestamptz;
 alter table user_profiles add column if not exists created_at      timestamptz default now();
 
--- Fix TEXT→JSONB type drift (children stored as string when column was TEXT)
-do $$ begin
-  alter table user_profiles
-    alter column children      type jsonb using case when children      is null then '[]'::jsonb else children::jsonb end,
-    alter column pending_media type jsonb using case when pending_media is null then '[]'::jsonb else pending_media::jsonb end;
-exception when others then
-  null; -- columns already jsonb, nothing to do
+-- Fix TEXT→JSONB type drift (children stored as string when column was TEXT).
+-- Check the current type rather than attempting the cast and swallowing the
+-- error: in the steady state (already jsonb) this does nothing and raises
+-- nothing, so there is no expected failure left to catch — and a genuine
+-- failure, such as a row holding text that isn't valid JSON, now propagates
+-- instead of disappearing.
+do $$
+declare
+  children_type text;
+  media_type    text;
+begin
+  select data_type into children_type
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'user_profiles' and column_name = 'children';
+
+  select data_type into media_type
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'user_profiles' and column_name = 'pending_media';
+
+  if children_type is not null and children_type <> 'jsonb' then
+    alter table user_profiles
+      alter column children type jsonb
+      using case when children is null then '[]'::jsonb else children::jsonb end;
+    raise notice 'migrate: converted user_profiles.children from % to jsonb', children_type;
+  end if;
+
+  if media_type is not null and media_type <> 'jsonb' then
+    alter table user_profiles
+      alter column pending_media type jsonb
+      using case when pending_media is null then '[]'::jsonb else pending_media::jsonb end;
+    raise notice 'migrate: converted user_profiles.pending_media from % to jsonb', media_type;
+  end if;
 end $$;
 
 alter table user_profiles enable row level security;

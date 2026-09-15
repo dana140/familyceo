@@ -39,10 +39,12 @@ create table if not exists reminders (
   type text not null default 'reminder',
   schedule_time text not null,   -- 'HH:MM' in 24h local time
   frequency text not null default 'once',  -- 'once' | 'daily' | 'weekdays' | 'weekly'
-  start_date date,
+  start_date date not null,      -- the day the reminder belongs to; 'once' fires only on this date
   end_date date,
   active boolean default true,
   last_sent_at timestamptz,
+  stale_skipped_at timestamptz,  -- set when the scheduler dropped it as past-dated
+  stale_notified_at timestamptz, -- set once the user has been told it was dropped
   created_at timestamptz default now()
 );
 

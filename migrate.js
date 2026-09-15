@@ -34,6 +34,36 @@ create table if not exists reminders (
   created_at timestamptz default now()
 );
 
+-- Bookkeeping for reminders the scheduler had to drop as stale, so they can be
+-- surfaced to the user rather than disappearing.
+alter table reminders add column if not exists stale_skipped_at  timestamptz;
+alter table reminders add column if not exists stale_notified_at timestamptz;
+
+-- start_date must always be present: a reminder with no date anchor has no
+-- defined correct behaviour, and leaving it nullable let the query semantics
+-- decide instead. Backfill from created_at, then enforce it.
+do $$
+declare
+  nullable  text;
+  bad_rows  bigint;
+begin
+  select is_nullable into nullable
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'reminders' and column_name = 'start_date';
+
+  if nullable = 'YES' then
+    select count(*) into bad_rows from reminders where start_date is null;
+    if bad_rows > 0 then
+      raise notice 'migrate: backfilling % reminders row(s) with a null start_date from created_at', bad_rows;
+      update reminders
+        set start_date = ((created_at at time zone 'Europe/London')::date)
+        where start_date is null;
+    end if;
+    alter table reminders alter column start_date set not null;
+    raise notice 'migrate: reminders.start_date is now NOT NULL';
+  end if;
+end $$;
+
 -- Create fresh if it doesn't exist yet
 create table if not exists user_profiles (
   id              uuid        primary key default gen_random_uuid(),

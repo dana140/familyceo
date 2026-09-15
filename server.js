@@ -130,6 +130,57 @@ function parseModelJson(raw) {
   throw new SyntaxError('unterminated JSON value in model output');
 }
 
+// ── WhatsApp markup sanitiser ─────────────────────────────────────────────────
+// Claude writes standard Markdown; WhatsApp uses its own syntax. Bold is a
+// SINGLE asterisk here, so **bold** arrives with visible asterisks, and
+// [label](url) is not a link format WhatsApp knows at all. Applied at the two
+// outbound choke points so every message is covered, whatever generated it.
+//
+// WhatsApp's parser is strict: markers must be balanced, must not have a space
+// immediately inside them, and must not span a line break. Every rule below
+// keeps to that — `[^*\n]` prevents spanning lines, and inner text is trimmed
+// so `** 2 Oct **` becomes `*2 Oct*` rather than a marker WhatsApp ignores.
+function toWhatsAppMarkup(text) {
+  if (typeof text !== 'string' || text === '') return text;
+  let out = text;
+
+  // [label](url) → "label: url" (bare URLs autolink; the Markdown form does not)
+  out = out.replace(/\[([^\]\n]*)\]\((\S+?)\)/g, (m, label, url) => {
+    const l = label.trim();
+    return (!l || l === url) ? url : `${l}: ${url}`;
+  });
+
+  // ### Heading → *Heading*
+  out = out.replace(/^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm, (m, h) => {
+    const t = h.trim();
+    return t ? `*${t}*` : m;
+  });
+
+  // ***bold italic*** → *_bold italic_*  (must run before the ** rule)
+  out = out.replace(/\*\*\*([^*\n]+?)\*\*\*/g, (m, i) => {
+    const t = i.trim();
+    return t ? `*_${t}_*` : m;
+  });
+
+  // **bold** → *bold*
+  out = out.replace(/\*\*([^*\n]+?)\*\*/g, (m, i) => {
+    const t = i.trim();
+    return t ? `*${t}*` : m;
+  });
+
+  // __bold__ → _italic_ (WhatsApp has no underscore-bold; single _ is italic)
+  out = out.replace(/__([^_\n]+?)__/g, (m, i) => {
+    const t = i.trim();
+    return t ? `_${t}_` : m;
+  });
+
+  // A lone "* " opening a line is a Markdown bullet, but WhatsApp reads the
+  // asterisk as an unbalanced bold marker. Use a real bullet character.
+  out = out.replace(/^([ \t]*)\*[ \t]+(?=\S)/gm, '$1• ');
+
+  return out;
+}
+
 // ── Profile loader ────────────────────────────────────────────────────────────
 async function loadProfile(whatsappNumber) {
   const normalised = normalisePhone(whatsappNumber);
@@ -477,6 +528,38 @@ function trimHistory(history) {
   return trimmed;
 }
 
+// Any reminder the scheduler had to drop as stale is reported to the user the
+// next time they message. A dropped reminder nobody ever hears about is exactly
+// the silent-failure class we removed from the write path.
+async function pendingStaleNotice(whatsappNumber) {
+  const { data, error } = await supabase
+    .from('reminders')
+    .select('id, context, start_date, schedule_time')
+    .eq('whatsapp_number', whatsappNumber)
+    .not('stale_skipped_at', 'is', null)
+    .is('stale_notified_at', null)
+    .order('stale_skipped_at', { ascending: true })
+    .limit(5);
+
+  if (error) {
+    console.error(`⚠️  Could not check for dropped reminders for ${whatsappNumber}: ${error.message}`);
+    return '';
+  }
+  if (!data?.length) return '';
+
+  const lines = data.map(r => `• "${r.context}" — was set for ${r.start_date} at ${r.schedule_time}`).join('\n');
+
+  const { error: markErr } = await supabase
+    .from('reminders')
+    .update({ stale_notified_at: new Date().toISOString() })
+    .in('id', data.map(r => r.id));
+  if (markErr) console.error(`⚠️  Could not mark dropped reminders as notified: ${markErr.message}`);
+
+  console.log(`📣 Surfacing ${data.length} dropped reminder(s) to ${whatsappNumber}`);
+  const noun = data.length === 1 ? "a reminder that didn't send" : `${data.length} reminders that didn't send`;
+  return `⚠️ Heads up — ${noun}, because the date had already passed:\n${lines}\n\n`;
+}
+
 async function getClaudeReply(from, userMessage, profile, gcalEvents = []) {
   if (!conversations[from]) conversations[from] = [];
   conversations[from].push({ role: 'user', content: userMessage });
@@ -497,7 +580,7 @@ async function getClaudeReply(from, userMessage, profile, gcalEvents = []) {
 
 function buildTwimlResponse(message) {
   const twiml = new twilio.twiml.MessagingResponse();
-  twiml.message(message);
+  twiml.message(toWhatsAppMarkup(message));
   return twiml.toString();
 }
 
@@ -631,7 +714,7 @@ async function sendWhatsApp(to, body) {
   await twilioClient.messages.create({
     from: process.env.TWILIO_SANDBOX,
     to:   recipient,
-    body,
+    body: toWhatsAppMarkup(body),
   });
 }
 
@@ -729,14 +812,40 @@ RULES:
 
 // ── Reminder content generator ────────────────────────────────────────────────
 async function generateReminderContent(reminder, profile) {
-  const today = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+  const now      = new Date();
+  const todayISO = now.toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  const today    = now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+
+  // Every reminder that reaches this point is due today: 'once' only fires when
+  // start_date === today, and a recurring one only on a day it recurs. So
+  // start_date is NOT the event date here — for a weekly reminder it is the
+  // anchor weekday, and treating it as the event date would make the message
+  // announce the wrong day entirely.
+  //
+  // What can still be stale is relative wording frozen into the context text
+  // when the reminder was written, so say when it was written and tell the
+  // model to go by the clock times rather than echoing that wording.
+  const writtenOn = reminder.created_at
+    ? new Date(reminder.created_at).toLocaleDateString('en-GB', {
+        weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Europe/London',
+      })
+    : null;
+
+  const dateLine =
+    `Today is ${today}. This reminder is due TODAY, so "this morning"/"this afternoon"/"tonight" ` +
+    `are correct when they match the time given below.` +
+    (writtenOn
+      ? ` The description was written on ${writtenOn}, so any relative day wording inside it may be out of date — ` +
+        `go by the clock times it states, and never repeat a day reference from it that contradicts today.`
+      : '');
+
   const response = await anthropic.messages.create({
     model:      'claude-sonnet-4-6',
     max_tokens: 300,
     system:     buildSystemPrompt(profile),
     messages: [{
       role: 'user',
-      content: `Today is ${today}. Generate a short WhatsApp notification for: ${reminder.context}. This is a proactive reminder, not a reply — keep it natural and brief.`,
+      content: `${dateLine}\n\nGenerate a short WhatsApp notification for: ${reminder.context}. This is a proactive reminder, not a reply — keep it natural and brief.`,
     }],
   });
   return response.content[0].text.trim();
@@ -957,6 +1066,22 @@ async function runScheduler() {
     if (r.end_date && r.end_date < todayISO) {
       console.log(`   ↳ Skipping ${r.id} — past end_date (${r.end_date})`);
       await supabase.from('reminders').update({ active: false }).eq('id', r.id);
+      continue;
+    }
+    // 'once' is anchored to a specific day — start_date is the day the reminder
+    // BELONGS to, not a floor. The query uses <= so recurring frequencies work,
+    // which meant a one-off whose day had passed fired at the next occurrence of
+    // its clock time, days late. Firing late is worse than not firing: you act on
+    // it or you're confused, and either way you trust it less. So drop it — but
+    // record it so the user is told next time they message.
+    if (r.frequency === 'once' && r.start_date !== todayISO) {
+      console.error(`❌ Reminder STALE — NOT sending ${r.id}: "${r.context}"`);
+      console.error(`   It was set for ${r.start_date} at ${r.schedule_time}; today is ${todayISO}.`);
+      const { error: staleErr } = await supabase.from('reminders')
+        .update({ active: false, stale_skipped_at: now.toISOString() })
+        .eq('id', r.id);
+      if (staleErr) console.error(`   ⚠️  Could not mark ${r.id} as stale: ${staleErr.message}`);
+      else          console.error(`   ↳ Deactivated; will be surfaced to ${r.whatsapp_number} on their next message.`);
       continue;
     }
     if (r.frequency === 'weekdays' && (dayOfWeek === 0 || dayOfWeek === 6)) {
@@ -1366,8 +1491,12 @@ app.post('/webhook', async (req, res) => {
     const reply = await getClaudeReply(from, body, profile, gcalEvents);
     console.log(`📤 Claude: ${reply}`);
 
+    // Prepend deterministically rather than asking the model to mention it —
+    // this must reach the user every time, not most of the time.
+    const staleNotice = profile ? await pendingStaleNotice(profile.whatsapp_number) : '';
+
     res.type('text/xml');
-    res.send(buildTwimlResponse(reply));
+    res.send(buildTwimlResponse(staleNotice + reply));
   } catch (err) {
     console.error('❌ Error:', err.message);
     res.type('text/xml');

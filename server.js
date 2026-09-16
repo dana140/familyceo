@@ -240,6 +240,25 @@ function formatCalendarEvents(documents) {
   return section;
 }
 
+// ── Derived extra_notes ───────────────────────────────────────────────────────
+// preferences.extra_notes used to be a SECOND, independently-stored copy of the
+// children's activities, written only by the web form and readable by nothing
+// that could correct it. So a fact removed from children[].activities kept being
+// re-asserted from here forever. It is now DERIVED at read time: one source of
+// truth, and a removal from activities removes it everywhere.
+function deriveExtraNotes(profile) {
+  const derived = (profile.children || [])
+    .map(c => c.activities)
+    .filter(Boolean)
+    .join('; ');
+
+  const stored = (profile.preferences || {}).extra_notes;
+  if (stored && stored !== derived) {
+    console.log(`   deriveExtraNotes: ignoring stale stored extra_notes ${JSON.stringify(stored)} in favour of ${JSON.stringify(derived || '(none)')}`);
+  }
+  return derived;
+}
+
 // ── Notes formatter (with expiry) ────────────────────────────────────────────
 function formatNotes(notes, who = '') {
   if (!notes || notes.length === 0) return '';
@@ -250,8 +269,17 @@ function formatNotes(notes, who = '') {
   // A dateless note is a STANDING FACT ("PE is Tuesday and Wednesday"), not a
   // broken event. Dropping those silently is why a schedule correction could be
   // written and then never read back again.
-  const standing = notes.filter(n => !n.date);
-  const dated    = notes.filter(n => n.date);
+  // Superseded notes are kept in the profile for history but withheld from the
+  // prompt — a stale standing fact the user has retracted must not compete with
+  // the corrected one.
+  const live       = notes.filter(n => !n.superseded_at);
+  const supersededCount = notes.length - live.length;
+  if (supersededCount > 0) {
+    console.log(`   formatNotes${who ? ` [${who}]` : ''}: withheld ${supersededCount} superseded note(s) (kept in the profile)`);
+  }
+
+  const standing = live.filter(n => !n.date);
+  const dated    = live.filter(n => n.date);
 
   const upcoming = dated
     .filter(n => new Date(n.date) >= today)
@@ -374,7 +402,7 @@ HOUSEHOLD:
 - Bin day: ${h.bin_day || 'not set'}
 ${trades ? `Tradespeople:\n${trades}` : ''}
 ${calendarSection}${notesSection}${remindersSection}${gcalEvents.length > 0 ? `\nGOOGLE CALENDAR — LIVE (treat as authoritative for scheduling questions):\n${gcalEvents.map(e => `  ${e.date} ${e.time !== 'All day' ? e.time : '(all day)'}: ${e.title}`).join('\n')}` : ''}
-EXTRA NOTES: ${p.extra_notes || 'none'}
+EXTRA NOTES: ${deriveExtraNotes(profile) || 'none'}
 
 ━━━ WHAT YOU CAN ACTUALLY DO ━━━
 You CAN send messages on your own, without her messaging you first. This is real, not aspirational:
@@ -521,7 +549,7 @@ function chunkForExtraction(text, limit) {
 async function extractAndSave(message, profile) {
   const today = new Date().toISOString().split('T')[0];
   const number = profile.whatsapp_number;
-  const result = { saved: [], failed: [] };
+  const result = { saved: [], failed: [], removed: [], removals: [] };
   // A forwarded school email routinely runs past 1200 characters, and the deadline
   // is usually near the bottom — so the old truncation silently discarded exactly
   // what this product exists to catch. Haiku has a 200K context; the cap is now
@@ -539,6 +567,7 @@ async function extractAndSave(message, profile) {
 
   const notesAcc = [];
   const updatesAcc = [];
+  const removalsAcc = [];
 
   for (let ci = 0; ci < chunks.length; ci++) {
   const excerpt = chunks[ci];
@@ -563,6 +592,10 @@ There are two places information can go:
    and Wednesday", "bin day is Thursday"). Both are kept.
 2. "profile_updates" — durable structured facts about a CHILD that belong on their record.
    Use this for recurring schedule facts such as PE days, clubs and activities.
+3. "removals" — when the user says something has STOPPED, been dropped, cancelled or is
+   no longer true ("she doesn't do chess any more", "cancel swimming", "drop the tutor").
+   A removal is its own action, not an update: record WHAT is ending, and give the
+   profile_update that carries it out.
 
 PROFILE UPDATE RULES:
 - "field" must be one of: ${PROFILE_FIELDS.join(', ')}
@@ -573,6 +606,13 @@ PROFILE UPDATE RULES:
   → value "Chess Friday 07:45; PE Tuesday and Wednesday"
 - Only include a profile_update when the user states a durable fact about a child.
   Do not use it for one-off events.
+
+REMOVAL RULES:
+- When something stops, add BOTH: a "removals" entry naming what ended, AND a
+  "profile_updates" entry whose value is the current value with that thing taken out.
+- "what" is a short human phrase for what is ending, e.g. "chess on Fridays".
+- Do NOT write a note saying it stopped — the removal is the record. A note alongside
+  would sit in the profile contradicting the corrected fact.
 
 IMPORTANT DATE RULES:
 - Always resolve relative dates to absolute YYYY-MM-DD using today's date (${today})
@@ -594,10 +634,13 @@ Return ONLY valid JSON, no markdown, no explanation:
   ],
   "profile_updates": [
     { "child": "child's name", "field": "one of the allowed fields", "value": "complete new value" }
+  ],
+  "removals": [
+    { "child": "child's name or null", "field": "field it is being removed from", "what": "short phrase for what is ending" }
   ]
 }
 
-If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": []}`
+If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": [], "removals": []}`
     }],
   });
 
@@ -622,12 +665,20 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
       }
       updatesAcc.push(u);
     }
+    for (const rm of (parsed.removals || [])) {
+      if (!removalsAcc.some(x => x.what === rm.what && x.child === rm.child)) removalsAcc.push(rm);
+    }
   }
   } // end chunk loop
 
   const notes          = notesAcc;
   const profileUpdates = updatesAcc;
-  if (!notes.length && !profileUpdates.length) return result;
+  const removals       = removalsAcc;
+  result.removals      = removals;
+  if (!notes.length && !profileUpdates.length && !removals.length) return result;
+  if (removals.length) {
+    console.log(`🗑️  ${removals.length} removal(s) detected for ${number}: ${removals.map(r => `${r.child || 'profile'} — ${r.what}`).join(', ')}`);
+  }
 
   // Load once — both notes and children are written back to the same row.
   const { data: current, error: loadErr } = await supabase
@@ -704,7 +755,81 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
       } else {
         for (const a of applied) {
           console.log(`💾 Profile updated for ${a.name}.${a.field}: ${JSON.stringify(a.before)} → ${JSON.stringify(a.after)}`);
-          result.saved.push(`${a.name} ${a.field.replace(/_/g, ' ')} → ${a.after}`);
+          // A field changed by a removal is reported as a removal, not a save.
+          const isRemoval = removals.some(rm => (rm.child || '').toLowerCase() === a.name.toLowerCase());
+          if (!isRemoval) result.saved.push(`${a.name} ${a.field.replace(/_/g, ' ')} → ${a.after}`);
+        }
+      }
+    }
+  }
+
+  // ── removal fan-out ────────────────────────────────────────────────────────
+  // One classification, applied to every store that holds the fact. extra_notes
+  // needs no step of its own: it is derived from activities, so correcting
+  // activities corrects it too.
+  if (removals.length) {
+    for (const rm of removals) {
+      result.removed.push(`${rm.child ? `${rm.child} — ` : ''}${rm.what}`);
+    }
+
+    // 1. Supersede any note that asserts the removed fact. Flagged in place,
+    //    never deleted — the history is what makes this system debuggable.
+    const terms = removals
+      .map(rm => String(rm.what || '').toLowerCase().split(/\s+/).filter(w => w.length > 3))
+      .flat();
+    if (terms.length) {
+      const { data: noteRow } = await supabase
+        .from('profiles').select('notes').eq('whatsapp_number', number).single();
+      const allNotes = noteRow?.notes || [];
+      let touched = 0;
+      const updatedNotes = allNotes.map(n => {
+        if (n.superseded_at) return n;
+        const hay = `${n.title || ''} ${n.raw || ''}`.toLowerCase();
+        if (terms.some(t => hay.includes(t))) {
+          touched++;
+          return { ...n, superseded_at: new Date().toISOString(), superseded_by: removals.map(r => r.what).join('; ') };
+        }
+        return n;
+      });
+      if (touched > 0) {
+        const { error: supErr } = await supabase
+          .from('profiles').update({ notes: updatedNotes }).eq('whatsapp_number', number);
+        if (supErr) {
+          console.error(`❌ Could not supersede ${touched} note(s) for ${number}: ${supErr.message}`);
+          result.failed.push({ label: 'retiring the old note', reason: supErr.message });
+        } else {
+          console.log(`🗑️  Superseded ${touched} note(s) for ${number} (flagged, not deleted)`);
+        }
+      }
+    }
+
+    // 2. Reminders are NOT deactivated here. A misparse that silently stops a
+    //    real alert is the worst failure this product has, because nobody finds
+    //    out until the thing they needed did not happen. Park and ask.
+    const { data: liveReminders, error: remErr } = await supabase
+      .from('reminders')
+      .select('id, context, schedule_time, frequency')
+      .eq('whatsapp_number', number).eq('type', 'reminder').eq('active', true)
+      .is('pending_cancel_at', null);
+
+    if (remErr) {
+      console.error(`⚠️  Could not check reminders against removals for ${number}: ${remErr.message}`);
+    } else {
+      const matches = (liveReminders || []).filter(r => {
+        const hay = String(r.context || '').toLowerCase();
+        return terms.some(t => hay.includes(t));
+      });
+      if (matches.length) {
+        const { error: parkErr } = await supabase
+          .from('reminders')
+          .update({ pending_cancel_at: new Date().toISOString(), pending_cancel_reason: removals.map(r => r.what).join('; ') })
+          .in('id', matches.map(m => m.id));
+        if (parkErr) {
+          console.error(`❌ Could not park ${matches.length} reminder(s) for confirmation: ${parkErr.message}`);
+          result.failed.push({ label: 'checking your reminders', reason: parkErr.message });
+        } else {
+          console.log(`❓ Parked ${matches.length} reminder(s) for ${number} awaiting cancel confirmation: ${matches.map(m => m.context).join(', ')}`);
+          result.pendingCancels = matches;
         }
       }
     }
@@ -729,16 +854,75 @@ function trimHistory(history) {
   return trimmed;
 }
 
+// A removal parks matching reminders instead of deactivating them. This resolves
+// that on the user's next message: an explicit yes cancels, anything else keeps
+// them. Either way the user is told what happened.
+const AFFIRMATIVE = /^\s*(y|ya|yes|yep|yeah|yup|ok|okay|sure|confirm(ed)?|do it|go ahead|please do|correct|that.s right)\b/i;
+const NEGATIVE    = /^\s*(n|no|nope|don.t|do not|keep|leave|cancel that|stop)\b/i;
+
+async function resolvePendingCancels(whatsappNumber, message) {
+  const { data: pending, error } = await supabase
+    .from('reminders')
+    .select('id, context, schedule_time, pending_cancel_reason')
+    .eq('whatsapp_number', whatsappNumber)
+    .eq('active', true)
+    .not('pending_cancel_at', 'is', null);
+
+  if (error) {
+    console.error(`⚠️  Could not load pending cancellations for ${whatsappNumber}: ${error.message}`);
+    return '';
+  }
+  if (!pending?.length) return '';
+
+  const ids = pending.map(p => p.id);
+  const list = pending.map(p => `• "${p.context}" at ${p.schedule_time}`).join('\n');
+
+  if (AFFIRMATIVE.test(message)) {
+    const { error: offErr } = await supabase
+      .from('reminders')
+      .update({ active: false, pending_cancel_at: null, pending_cancel_reason: null })
+      .in('id', ids);
+    if (offErr) {
+      console.error(`❌ Could not cancel ${ids.length} confirmed reminder(s): ${offErr.message}`);
+      return `\n\n⚠️ I tried to stop ${pending.length === 1 ? 'that reminder' : 'those reminders'} but the update failed — ${offErr.message}`;
+    }
+    console.log(`🗑️  Cancelled ${ids.length} reminder(s) for ${whatsappNumber} after explicit confirmation`);
+    return `\n\n🗑️ Stopped:\n${list}`;
+  }
+
+  if (NEGATIVE.test(message)) {
+    const { error: keepErr } = await supabase
+      .from('reminders')
+      .update({ pending_cancel_at: null, pending_cancel_reason: null })
+      .in('id', ids);
+    if (keepErr) console.error(`⚠️  Could not clear pending cancellation flags: ${keepErr.message}`);
+    console.log(`↩️  Kept ${ids.length} reminder(s) for ${whatsappNumber} — user declined`);
+    return `\n\n✅ Keeping ${pending.length === 1 ? 'that reminder' : 'those reminders'} as they are.`;
+  }
+
+  // Neither — re-ask rather than guess. Nothing is stopped on an ambiguous reply.
+  console.log(`❓ ${ids.length} reminder(s) still awaiting a yes/no for ${whatsappNumber}`);
+  return `\n\n❓ Still waiting on this — should I stop ${pending.length === 1 ? 'this reminder' : 'these reminders'}? Reply *yes* or *no*:\n${list}`;
+}
+
 // The receipt is built from what the writes actually returned, never from the
 // model's prose. If nothing was written, nothing is said.
 function formatWriteReceipt(receipt) {
   if (!receipt) return '';
-  const { saved = [], failed = [] } = receipt;
-  if (!saved.length && !failed.length) return '';
+  const { saved = [], failed = [], removed = [], pendingCancels = [] } = receipt;
+  if (!saved.length && !failed.length && !removed.length && !pendingCancels.length) return '';
 
   let out = '';
   if (saved.length === 1)      out += `\n\n✅ Saved: ${saved[0]}`;
   else if (saved.length > 1)   out += `\n\n✅ Saved:\n${saved.map(s => `• ${s}`).join('\n')}`;
+
+  if (removed.length === 1)    out += `\n\n🗑️ Removed: ${removed[0]}`;
+  else if (removed.length > 1) out += `\n\n🗑️ Removed:\n${removed.map(r => `• ${r}`).join('\n')}`;
+
+  if (pendingCancels.length) {
+    out += `\n\n❓ You still have ${pendingCancels.length === 1 ? 'a reminder' : `${pendingCancels.length} reminders`} for this — stop ${pendingCancels.length === 1 ? 'it' : 'them'}? Reply *yes* or *no*:\n` +
+           pendingCancels.map(p => `• "${p.context}" at ${p.schedule_time}`).join('\n');
+  }
 
   if (failed.length === 1)     out += `\n\n⚠️ Couldn't save ${failed[0].label} — ${failed[0].reason}`;
   else if (failed.length > 1)  out += `\n\n⚠️ Couldn't save:\n${failed.map(f => `• ${f.label} — ${f.reason}`).join('\n')}`;
@@ -1040,7 +1224,7 @@ Household:
 - Bin day: ${h.bin_day || 'not set'}
 ${trades ? `Tradespeople:\n${trades}` : ''}
 ${calendarSection}${notesSection}${gcalSection}${gmailSection}
-Extra notes: ${p.extra_notes || 'none'}
+Extra notes: ${deriveExtraNotes(profile) || 'none'}
 
 RULES:
 - Start with "Good morning ${profile.mum_name} 👋"
@@ -1158,7 +1342,9 @@ Decide what the NEW USER MESSAGE means for the user's reminders.
   (e.g. "sorry I meant 18:28", "actually make it 7pm", "change that to tomorrow")
   → action "update", and set "id" to the id of the reminder it is changing.
   Prefer the most recently created reminder when the correction is ambiguous.
-- If it asks to cancel/stop a reminder → action "cancel" with the "id".
+- If it says something has STOPPED or should be cancelled ("she's dropped chess",
+  "cancel swimming"), return has_reminder false. Cancellation is decided in one
+  place elsewhere and confirmed with the user first — do not act on it here.
 - If it is not about reminders at all → return has_reminder false.
 
 Return ONLY valid JSON, no commentary before or after:
@@ -1166,8 +1352,8 @@ Return ONLY valid JSON, no commentary before or after:
   "has_reminder": true or false,
   "reminders": [
     {
-      "action": "create" | "update" | "cancel",
-      "id": "existing reminder id — required for update and cancel, null for create",
+      "action": "create" | "update",
+      "id": "existing reminder id — required for update, null for create",
       "context": "what to generate/send — be specific, e.g. 'a short maths exercise for Ellie about Time'",
       "schedule_time": "HH:MM in 24h",
       "frequency": "once | daily | weekdays | weekly",
@@ -1479,13 +1665,26 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     const { text } = await pdfParse(req.file.buffer);
     console.log(`📝 Extracted ${text.length} characters from PDF`);
 
-    // 2. Ask Claude to parse dates and events
-    const extraction = await anthropic.messages.create({
-      model:      'claude-sonnet-4-6',
-      max_tokens: 2000,
-      messages: [{
-        role: 'user',
-        content: `Extract all dates and events from this school/family document.
+    // 2. Ask Claude to parse dates and events.
+    // A term calendar puts the summer dates at the bottom, so slicing at 8000
+    // characters silently dropped half the year — the same bug that was cutting
+    // forwarded emails, in the path built to read long school documents.
+    const docChunks = chunkForExtraction(text, EXTRACTION_CHUNK_CHARS);
+    if (docChunks.length > 1) {
+      console.log(`📄 Document is ${text.length} chars — extracting in ${docChunks.length} chunks so the end is not lost`);
+    }
+
+    let events = [];
+    const chunkFailures = [];
+
+    for (let di = 0; di < docChunks.length; di++) {
+      const part = docChunks.length > 1 ? ` (part ${di + 1} of ${docChunks.length})` : '';
+      const extraction = await anthropic.messages.create({
+        model:      'claude-sonnet-4-6',
+        max_tokens: 2000,
+        messages: [{
+          role: 'user',
+          content: `Extract all dates and events from this school/family document${part}.
 Return ONLY a JSON array with this structure (no markdown, no explanation):
 [{"date":"YYYY-MM-DD","title":"Event name","type":"term|holiday|inset|event|other"}]
 
@@ -1497,18 +1696,31 @@ Rules:
 - Use the current year context: today is ${new Date().toISOString().split('T')[0]}
 
 DOCUMENT TEXT:
-${text.slice(0, 8000)}`
-      }],
-    });
+${docChunks[di]}`
+        }],
+      });
 
-    let events = [];
-    try {
-      const raw = extraction.content[0].text.trim();
-      const jsonStr = raw.startsWith('[') ? raw : raw.match(/\[[\s\S]*\]/)?.[0] || '[]';
-      events = JSON.parse(jsonStr);
-      console.log(`📅 Extracted ${events.length} events`);
-    } catch (e) {
-      console.error('⚠️  Could not parse events JSON:', e.message);
+      try {
+        const found = parseModelJson(extraction.content[0].text);
+        if (Array.isArray(found)) events.push(...found);
+        else console.error(`⚠️  Event extraction${part} returned a non-array — ignoring`);
+      } catch (e) {
+        console.error(`⚠️  Could not parse events JSON${part}: ${e.message}`);
+        chunkFailures.push(di + 1);
+      }
+    }
+
+    // De-duplicate across chunk boundaries (an event can appear in two parts)
+    const seen = new Set();
+    events = events.filter(e => {
+      const key = `${e.date}|${String(e.title || '').toLowerCase().trim()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    console.log(`📅 Extracted ${events.length} events from ${docChunks.length} chunk(s)`);
+    if (chunkFailures.length) {
+      console.error(`❌ ${chunkFailures.length} of ${docChunks.length} document chunk(s) could not be read (parts ${chunkFailures.join(', ')}) — events in those sections were NOT captured`);
     }
 
     // 3. Load existing profile documents
@@ -1726,8 +1938,10 @@ app.post('/webhook', async (req, res) => {
         }),
       ]);
       writeReceipt = {
-        saved:  [...infoResult.saved,  ...reminderResult.saved],
-        failed: [...infoResult.failed, ...reminderResult.failed],
+        saved:   [...infoResult.saved,  ...reminderResult.saved],
+        failed:  [...infoResult.failed, ...reminderResult.failed],
+        removed: infoResult.removed || [],
+        pendingCancels: infoResult.pendingCancels || [],
       };
     } else {
       // No profile means reminders are never even attempted — make that loud, and
@@ -1774,8 +1988,15 @@ app.post('/webhook', async (req, res) => {
     // this must reach the user every time, not most of the time.
     const staleNotice = profile ? await pendingStaleNotice(profile.whatsapp_number) : '';
 
+    // Only resolve a pending cancellation if this message did not itself create
+    // one — otherwise a "yes" in the same breath as the request would confirm
+    // something the user has not yet been shown.
+    const cancelNotice = (profile && !(writeReceipt.pendingCancels || []).length)
+      ? await resolvePendingCancels(profile.whatsapp_number, body)
+      : '';
+
     res.type('text/xml');
-    res.send(buildTwimlResponse(staleNotice + reply + formatWriteReceipt(writeReceipt)));
+    res.send(buildTwimlResponse(staleNotice + reply + formatWriteReceipt(writeReceipt) + cancelNotice));
   } catch (err) {
     console.error('❌ Error:', err.message);
     res.type('text/xml');

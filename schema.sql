@@ -45,6 +45,8 @@ create table if not exists reminders (
   last_sent_at timestamptz,
   stale_skipped_at timestamptz,  -- set when the scheduler dropped it as past-dated
   stale_notified_at timestamptz, -- set once the user has been told it was dropped
+  pending_cancel_at timestamptz,     -- a removal matched this; awaiting user confirmation
+  pending_cancel_reason text,        -- what the user said that matched it
   created_at timestamptz default now()
 );
 

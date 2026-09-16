@@ -39,6 +39,12 @@ create table if not exists reminders (
 alter table reminders add column if not exists stale_skipped_at  timestamptz;
 alter table reminders add column if not exists stale_notified_at timestamptz;
 
+-- A removal never deactivates a reminder outright — it parks it here and asks.
+-- Silently stopping a real alert is the worst failure this system has, because
+-- nobody finds out until the thing they needed did not happen.
+alter table reminders add column if not exists pending_cancel_at     timestamptz;
+alter table reminders add column if not exists pending_cancel_reason text;
+
 -- start_date must always be present: a reminder with no date anchor has no
 -- defined correct behaviour, and leaving it nullable let the query semantics
 -- decide instead. Backfill from created_at, then enforce it.

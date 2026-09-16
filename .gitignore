@@ -1,3 +1,7 @@
 node_modules/
 .env
 *.log
+# Never commit env files or their backups — these hold live service keys.
+.env.*
+!.env.example
+*.save

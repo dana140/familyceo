@@ -201,20 +201,32 @@ function formatCalendarEvents(documents) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const all = documents
-    .flatMap(doc => (doc.events || []).map(e => ({ ...e, source: doc.filename })))
+  const everything = documents
+    .flatMap(doc => (doc.events || []).map(e => ({ ...e, source: doc.filename })));
+
+  const all = everything
     .filter(e => new Date(e.date) >= today)
     .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  const pastCount = everything.length - all.length;
+  if (pastCount > 0) {
+    console.log(`   formatCalendarEvents: withheld ${pastCount} past event(s) from the prompt (kept in the profile)`);
+  }
 
   const imminent = all.filter(e => {
     const daysAhead = (new Date(e.date) - today) / (1000 * 60 * 60 * 24);
     return daysAhead <= 7;
   });
 
-  const reference = all.filter(e => {
+  const REFERENCE_CAP = 30;
+  const allReference = all.filter(e => {
     const daysAhead = (new Date(e.date) - today) / (1000 * 60 * 60 * 24);
     return daysAhead > 7;
-  }).slice(0, 30);
+  });
+  const reference = allReference.slice(0, REFERENCE_CAP);
+  if (allReference.length > REFERENCE_CAP) {
+    console.warn(`⚠️  formatCalendarEvents: ${allReference.length} future reference events, showing only the first ${REFERENCE_CAP} — ${allReference.length - REFERENCE_CAP} not visible to the assistant (furthest shown: ${reference[reference.length - 1]?.date})`);
+  }
 
   let section = '';
   if (imminent.length > 0) {
@@ -420,7 +432,11 @@ async function handleOnboarding(phone, body, state) {
   if (!state) {
     const { error } = await supabase.from('user_profiles')
       .insert({ phone_number: phone, onboarding_step: 1 });
-    if (error) throw error;
+    if (error) {
+      console.error(`❌ ONBOARDING INSERT FAILED for ${phone}: ${error.message}`);
+      if (error.details) console.error(`   Details: ${error.details}`);
+      throw error;
+    }
     console.log(`👋 New user onboarding started: ${phone}`);
     return WELCOME_MSG;
   }
@@ -429,17 +445,31 @@ async function handleOnboarding(phone, body, state) {
 
   // "done" → check profiles table for their completed form
   if (normalised === 'done') {
-    const { data: profile } = await supabase
+    // This read's error used to be discarded, so a failed lookup was
+    // indistinguishable from "no profile saved" — and the user was told to go
+    // and save a profile they had already saved.
+    const { data: profile, error: readErr } = await supabase
       .from('profiles')
       .select('mum_name, preferences')
       .eq('whatsapp_number', phone)
       .maybeSingle();
 
+    if (readErr) {
+      console.error(`❌ ONBOARDING PROFILE READ FAILED for ${phone}: ${readErr.message}`);
+      console.error(`   Not telling the user their profile is missing — it may well exist.`);
+      return `I couldn't reach your profile just then — that's my end, not yours. Try replying *done* again in a moment.`;
+    }
+
     if (profile?.mum_name) {
       const { error } = await supabase.from('user_profiles')
         .update({ name: profile.mum_name, onboarded_at: new Date().toISOString() })
         .eq('phone_number', phone);
-      if (error) throw error;
+      if (error) {
+        console.error(`❌ ONBOARDING COMPLETION FAILED for ${profile.mum_name} (${phone}): ${error.message}`);
+        if (error.details) console.error(`   Details: ${error.details}`);
+        console.error(`   NOT sending the "You're all set" message — onboarding did not complete.`);
+        throw error;
+      }
       console.log(`✅ Onboarding complete for ${profile.mum_name} (${phone})`);
       const name         = profile.mum_name;
       const briefingTime = (profile.preferences || {}).briefing_time || '07:30';
@@ -466,13 +496,40 @@ async function handleOnboarding(phone, body, state) {
 // Returns { saved: [label], failed: [{label, reason}] } so the caller can build a
 // receipt from what actually happened, rather than letting the model assert it.
 const PROFILE_FIELDS = ['activities', 'school', 'year_group', 'dietary_needs', 'allergies', 'extra_needs'];
+const EXTRACTION_CHUNK_CHARS = 12000;
+
+// Split on paragraph, then line, then hard boundaries — never mid-message-and-discard.
+function chunkForExtraction(text, limit) {
+  const src = String(text ?? '');
+  if (src.length <= limit) return [src];
+
+  const chunks = [];
+  let rest = src;
+  while (rest.length > limit) {
+    const window = rest.slice(0, limit);
+    let cut = window.lastIndexOf('\n\n');
+    if (cut < limit * 0.5) cut = window.lastIndexOf('\n');
+    if (cut < limit * 0.5) cut = window.lastIndexOf(' ');
+    if (cut < limit * 0.5) cut = limit;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\s+/, '');
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
 
 async function extractAndSave(message, profile) {
   const today = new Date().toISOString().split('T')[0];
   const number = profile.whatsapp_number;
   const result = { saved: [], failed: [] };
-  // Truncate long forwarded messages — Haiku only needs enough to identify events
-  const excerpt = message.length > 1200 ? message.slice(0, 1200) + '…' : message;
+  // A forwarded school email routinely runs past 1200 characters, and the deadline
+  // is usually near the bottom — so the old truncation silently discarded exactly
+  // what this product exists to catch. Haiku has a 200K context; the cap is now
+  // generous, and anything longer is CHUNKED rather than cut, so nothing is lost.
+  const chunks = chunkForExtraction(message, EXTRACTION_CHUNK_CHARS);
+  if (chunks.length > 1) {
+    console.log(`   Message is ${message.length} chars — extracting in ${chunks.length} chunks so the tail is not lost`);
+  }
 
   // The model can only return a correct replacement value if it can see the
   // current one — otherwise "PE is Tuesday and Wednesday" would wipe "Chess Friday".
@@ -480,6 +537,12 @@ async function extractAndSave(message, profile) {
     `  - ${c.name}: activities=${JSON.stringify(c.activities || '')}, school=${JSON.stringify(c.school || '')}, year_group=${JSON.stringify(c.year_group || '')}, dietary_needs=${JSON.stringify(c.dietary_needs || '')}, allergies=${JSON.stringify(c.allergies || '')}, extra_needs=${JSON.stringify(c.extra_needs || '')}`
   ).join('\n') || '  (no children on file)';
 
+  const notesAcc = [];
+  const updatesAcc = [];
+
+  for (let ci = 0; ci < chunks.length; ci++) {
+  const excerpt = chunks[ci];
+  const chunkLabel = chunks.length > 1 ? ` [chunk ${ci + 1}/${chunks.length}]` : '';
   const extraction = await anthropic.messages.create({
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 800,
@@ -543,15 +606,28 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
   try {
     parsed = parseModelJson(raw);
   } catch (e) {
-    console.error(`❌ Note extraction returned unparseable JSON for ${number}: ${e.message}`);
+    console.error(`❌ Note extraction returned unparseable JSON for ${number}${chunkLabel}: ${e.message}`);
     console.error(`   Raw model output was: ${raw.slice(0, 500)}`);
-    result.failed.push({ label: 'anything from that message', reason: 'could not read the extraction result' });
-    return result;
+    result.failed.push({ label: `anything from that message${chunkLabel}`, reason: 'could not read the extraction result' });
+    continue;
   }
 
-  const notes          = parsed.notes || [];
-  const profileUpdates = parsed.profile_updates || [];
-  if (!parsed.has_new_info || (!notes.length && !profileUpdates.length)) return result;
+  if (parsed.has_new_info) {
+    notesAcc.push(...(parsed.notes || []));
+    for (const u of (parsed.profile_updates || [])) {
+      const clash = updatesAcc.find(x => x.child === u.child && x.field === u.field);
+      if (clash) {
+        console.warn(`⚠️  Conflicting profile_update across chunks for ${u.child}.${u.field} — keeping ${JSON.stringify(clash.value)}, ignoring ${JSON.stringify(u.value)}`);
+        continue;
+      }
+      updatesAcc.push(u);
+    }
+  }
+  } // end chunk loop
+
+  const notes          = notesAcc;
+  const profileUpdates = updatesAcc;
+  if (!notes.length && !profileUpdates.length) return result;
 
   // Load once — both notes and children are written back to the same row.
   const { data: current, error: loadErr } = await supabase

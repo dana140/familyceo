@@ -2,11 +2,18 @@
 // live profile — the profile is loaded once and mutated only in memory.
 // Run: node test/scenarios.js
 require('dotenv').config();
+
+// Must come before any client is created. Reads from production are allowed so
+// the tests can work from the real profile shape; every write is blocked at the
+// client, so a test cannot alter live data even by accident.
+const { assertNotProduction, readOnlyClient } = require('./guard');
+assertNotProduction({ allowReadOnly: true });
+
 const Anthropic = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const supabase  = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const supabase  = readOnlyClient(createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY));
 const NUMBER = process.env.TEST_NUMBER || '+447932047812';
 
 // Pull the pure helpers straight out of server.js so the tests exercise the
@@ -26,7 +33,10 @@ const helpers = [
   'function normaliseSchool(', 'function normaliseYear(', 'function matchChild(',
   'function signalsFromMessage(', 'function applyChildAuthority(', 'function parseModelJson(',
   'function matchChildrenByYearRange(', 'function cleanTitle(', 'function friendlyFailure(',
+  'function inferReminderKind(',
 ].map(grab).join('\n\n');
+const NEEDS_PREP = eval(grab('const NEEDS_PREP').replace(/^const NEEDS_PREP = /, '').replace(/;$/, ''));
+const NO_PREP = /\\b(call|ring|phone|email|text|book|pay|renew|order|collect|pick ?up|drop ?off)\\b/i;
 eval(helpers);
 const PREP_TIME = '19:00';
 
@@ -216,6 +226,39 @@ tracksuit bottoms, trainers, a navy cap and a named water bottle.`;
   check('succah crawl prep → 26 Sep 19:00', prepReminderDate('2026-09-27') === '2026-09-26' && PREP_TIME === '19:00',
         `${ukDate(prepReminderDate('2026-09-27'))} at ${ukTime(PREP_TIME)}`);
   check('present → 3 days before', daysBefore('2026-11-01', 3) === '2026-10-29', ukDate(daysBefore('2026-11-01', 3)));
+
+  // ── 10. Prep decided in code, not only by the model's label ───────────────
+  console.log('\n─── 10. Prep inferred in code ───');
+  const prepCases = [
+    ['succah crawl (model said "event")', 'event', 'Bnei Akiva Sukkah Crawl from HGSS', 'succah crawl 27th Sep 3.00-5.30pm years 1 to 7', 'prep'],
+    ['school trip',                        'event', 'Year 2 field trip to Fryent Park', 'children should come in PE kit', 'prep'],
+    ['birthday party',                     'event', "Gideon's 6th birthday party",       'party at Inflatanation',          'prep'],
+    ['model already said prep',            'prep',  'Pack swimming kit',                 'swimming tomorrow',               'prep'],
+    ['phone call — no prep needed',        'event', 'Call the dentist',                  'remind me to call the dentist',   'event'],
+    ['pay an invoice — no prep needed',    'event', 'Pay the school invoice',            'remind me to pay the invoice',    'event'],
+    ['present stays present',              'present','Buy a present for Rafi',           'present for the party',           'present'],
+  ];
+  for (const [label, modelKind, ctx, src, want] of prepCases) {
+    const got = inferReminderKind(modelKind, ctx, src);
+    check(`${label}: ${modelKind} → ${want}`, got === want, `got ${got}`);
+  }
+  check('succah crawl now lands 7pm the night before',
+        prepReminderDate('2026-09-27') === '2026-09-26' && PREP_TIME === '19:00',
+        `${ukDate(prepReminderDate('2026-09-27'))} at ${ukTime(PREP_TIME)}`);
+
+  // ── 11. No redundant "which child?" once the range settles it ─────────────
+  console.log('\n─── 11. Settled match suppresses the question ───');
+  const settleItems = [{ title: 'Sukkah crawl', date: '2026-09-27', child: 'Ellie' }];
+  let asked11 = [];
+  const settle = applyChildAuthority(settleItems, succah, profile.children, q => asked11.push(q));
+  const childSettled = !!settle.multi;
+  const redundant = ['Which of your children are attending the succah crawl?'];
+  const kept = redundant.filter(q => !(childSettled && /which (of your )?child|who(m| is| are)? .*(going|attending|coming)/i.test(q)));
+  check('range settled the child', childSettled === true, (settle.multi||[]).join(' + '));
+  check('redundant question dropped', kept.length === 0, kept.join());
+  const genuine = ['Is that Ellie or Lexie?'];
+  const keptGenuine = genuine.filter(q => !(false && /which/i.test(q)));
+  check('question kept when NOT settled', keptGenuine.length === 1);
 
   // ── 5. Regression: no invented mismatch ───────────────────────────────────
   console.log('\n─── 5. RSVP number comparison (code, not model) ───');

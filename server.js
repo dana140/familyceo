@@ -687,6 +687,36 @@ function isDuplicateOf(candidate, existing) {
   return shared / Math.min(aw.size, bw.size) >= 0.6;
 }
 
+// Anything a child is taken to, or has to bring or wear something for, needs a
+// reminder the night before — the model labelled a succah crawl "event" and the
+// reminder landed at 15:00, the moment it started, which is no use for packing.
+// Decided here from the text so it does not depend on the model's judgement.
+const NEEDS_PREP = new RegExp([
+  'trip', 'outing', 'excursion', 'visit to', 'crawl',
+  'party', 'birthday', 'celebration',
+  'kit', 'uniform', 'costume', 'dress up', 'dress-up', 'mufti', 'non-?uniform',
+  'bring', 'wear', 'pack', 'present', 'gift', 'form', 'permission', 'consent',
+  'packed lunch', 'water bottle', 'swimming', 'pe\\b', 'games kit',
+  'assembly', 'concert', 'performance', 'match', 'fixture', 'gala',
+  'sign ?up', 'rsvp', 'medical form',
+].join('|'), 'i');
+
+// Things that are genuinely about the moment itself and need no preparation.
+const NO_PREP = /\b(call|ring|phone|email|text|book|pay|renew|order|collect|pick ?up|drop ?off)\b/i;
+
+function inferReminderKind(modelKind, context, sourceText) {
+  const k = String(modelKind || '').toLowerCase();
+  if (['prep', 'present', 'rsvp'].includes(k)) return k;   // trust an explicit prep-ish label
+
+  const hay = `${context || ''} ${sourceText || ''}`;
+  if (NO_PREP.test(hay) && !NEEDS_PREP.test(hay)) return k || 'event';
+  if (NEEDS_PREP.test(hay)) {
+    console.log(`   ⏱️  Treating as "prep" despite model saying ${JSON.stringify(k || 'nothing')} — the text describes something to get ready for`);
+    return 'prep';
+  }
+  return k || 'event';
+}
+
 // Prep reminders belong the evening before, not at the event. Computed here so
 // it cannot drift from whatever the model felt like suggesting.
 const PREP_TIME = '19:00';
@@ -1138,6 +1168,23 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
   notes = noteAuth.items;
   const updAuth = applyChildAuthority(profileUpdates, message, kids, q => clarifyAcc.push(q));
   profileUpdates = updAuth.items;
+
+  // The matcher settled it, so any question the model raised about WHICH child is
+  // redundant — asking after we already know reads as not having listened.
+  const childSettled = !!(noteAuth.multi || updAuth.multi) ||
+                       (!noteAuth.blocked && !updAuth.blocked && notes.some(n => n.children?.length));
+  if (childSettled && clarifyAcc.length) {
+    const before = clarifyAcc.length;
+    for (let i = clarifyAcc.length - 1; i >= 0; i--) {
+      if (/which (of your )?child|who(m| is| are)? .*(going|attending|coming)|is that (ellie|lexie|lily)/i.test(clarifyAcc[i])) {
+        clarifyAcc.splice(i, 1);
+      }
+    }
+    if (clarifyAcc.length < before) {
+      const who = (noteAuth.multi || updAuth.multi || notes.find(n => n.children?.length)?.children || []).join(' and ');
+      console.log(`   Dropped ${before - clarifyAcc.length} redundant "which child" question — already settled as ${who}`);
+    }
+  }
   if (noteAuth.blocked || updAuth.blocked) {
     console.warn(`   Nothing saved from this message — waiting for the user to say which child`);
   }
@@ -2090,7 +2137,7 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
     // 15:00, the moment it started, instead of the night before.
     let scheduleTime = normaliseScheduleTime(r.schedule_time);
     let startDate    = r.start_date || today;
-    const kind = String(r.kind || '').toLowerCase();
+    const kind = inferReminderKind(r.kind, r.context, message);
 
     if (action !== 'cancel' && (kind === 'prep' || kind === 'present' || kind === 'rsvp')) {
       const eventDate = r.start_date;

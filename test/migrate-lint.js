@@ -4,6 +4,8 @@
 // whole block at parse time (42601), so migrations stop running entirely and
 // the app boots anyway — a failure that is easy to miss.
 // Run: node test/migrate-lint.js
+require('dotenv').config();
+require('./guard').assertNotProduction({ allowReadOnly: true });  // static-only, but keep the habit uniform
 const fs = require('fs');
 const path = require('path');
 const src = fs.readFileSync(path.join(__dirname, '..', 'migrate.js'), 'utf8');

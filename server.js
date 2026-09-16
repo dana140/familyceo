@@ -229,32 +229,38 @@ function formatCalendarEvents(documents) {
 }
 
 // ── Notes formatter (with expiry) ────────────────────────────────────────────
-function formatNotes(notes) {
+function formatNotes(notes, who = '') {
   if (!notes || notes.length === 0) return '';
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const upcoming = notes
-    .filter(n => {
-      if (!n.date) return false;
-      return new Date(n.date) >= today;
-    })
+  // A dateless note is a STANDING FACT ("PE is Tuesday and Wednesday"), not a
+  // broken event. Dropping those silently is why a schedule correction could be
+  // written and then never read back again.
+  const standing = notes.filter(n => !n.date);
+  const dated    = notes.filter(n => n.date);
+
+  const upcoming = dated
+    .filter(n => new Date(n.date) >= today)
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  if (upcoming.length === 0) return '';
+  const past = dated.length - upcoming.length;
+  if (past > 0) {
+    console.log(`   formatNotes${who ? ` [${who}]` : ''}: withheld ${past} past-dated note(s) from the prompt (kept in the profile)`);
+  }
+  if (standing.length > 0) {
+    console.log(`   formatNotes${who ? ` [${who}]` : ''}: surfacing ${standing.length} standing fact(s) with no date`);
+  }
 
-  const thisWeek = upcoming.filter(n => {
-    const daysAhead = (new Date(n.date) - today) / (1000 * 60 * 60 * 24);
-    return daysAhead <= 7;
-  });
-
-  const later = upcoming.filter(n => {
-    const daysAhead = (new Date(n.date) - today) / (1000 * 60 * 60 * 24);
-    return daysAhead > 7;
-  });
+  const thisWeek = upcoming.filter(n => (new Date(n.date) - today) / (1000 * 60 * 60 * 24) <= 7);
+  const later    = upcoming.filter(n => (new Date(n.date) - today) / (1000 * 60 * 60 * 24) > 7);
 
   let section = '';
+  if (standing.length > 0) {
+    section += '\nSTANDING FACTS (no fixed date — these stay true until she says otherwise):\n' +
+      standing.map(n => `  ${n.title}${n.child ? ` (${n.child})` : ''}`).join('\n');
+  }
   if (thisWeek.length > 0) {
     section += '\nSAVED NOTES — THIS WEEK (mention if relevant):\n' +
       thisWeek.map(n => `  ${n.date}: ${n.title}`).join('\n');
@@ -267,7 +273,7 @@ function formatNotes(notes) {
 }
 
 // ── System prompt builder ─────────────────────────────────────────────────────
-function buildSystemPrompt(profile, gcalEvents = []) {
+function buildSystemPrompt(profile, gcalEvents = [], activeReminders = null) {
   if (!profile) {
     return `You are Family CEO — a personal AI assistant for a busy mum, available on WhatsApp.
 
@@ -286,7 +292,11 @@ BEHAVIOUR:
 
   const p = profile.preferences || {};
   const h = profile.household   || {};
-  const today = new Date().toISOString().split('T')[0];
+  const now       = new Date();
+  const today     = now.toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  // Computed here, never left to the model. Every weekday it inferred from a bare
+  // ISO date was a guess, and it guessed wrong (calling Tue 22 Sep a Monday).
+  const todayName = now.toLocaleDateString('en-GB', { weekday: 'long', timeZone: 'Europe/London' });
 
   const children = (profile.children || []).map((c, i) =>
     `  ${i + 1}. ${c.name}, age ${c.age}, ${c.year_group} at ${c.school}` +
@@ -298,7 +308,29 @@ BEHAVIOUR:
 
   const trades = (h.tradespeople || []).map(t => `  - ${t.role}: ${t.contact}`).join('\n');
   const calendarSection = formatCalendarEvents(profile.documents);
-  const notesSection = formatNotes(profile.notes);
+  const notesSection = formatNotes(profile.notes, profile.mum_name);
+
+  // The assistant had no sight of the reminders table at all, so asked "when is
+  // Ellie's PE?" it invented an answer. Give it the real rows, with the weekday
+  // spelled out so it never has to work one out.
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  // null means "not loaded in this context" — say nothing rather than assert
+  // there are none, which would be a false statement in the prompt.
+  const remindersSection = activeReminders === null
+    ? ''
+    : activeReminders.length > 0
+    ? `\nACTIVE REMINDERS (the real scheduled reminders — authoritative; never invent others):\n` +
+      activeReminders.map(r => {
+        const anchorDay = r.start_date ? DAYS[new Date(`${r.start_date}T12:00:00Z`).getUTCDay()] : '';
+        const when =
+          r.frequency === 'once'     ? `once on ${r.start_date} (${anchorDay})`
+        : r.frequency === 'weekly'   ? `every ${anchorDay}`
+        : r.frequency === 'weekdays' ? 'every weekday (Mon-Fri)'
+        : r.frequency === 'daily'    ? 'every day'
+        : r.frequency;
+        return `  ${r.schedule_time} ${when}: ${r.context}`;
+      }).join('\n')
+    : '\nACTIVE REMINDERS: none are currently set.';
 
   const style = {
     concise:  'Keep replies short and to the point.',
@@ -308,7 +340,8 @@ BEHAVIOUR:
   }[p.communication_style] || 'Be warm but concise.';
 
   return `You are Family CEO — the personal AI assistant for ${profile.mum_name}.
-Today's date: ${today}
+Today's date: ${today} — today is a ${todayName}.
+Never work out a day of the week from a date yourself; use the weekdays given to you here.
 
 ━━━ YOUR ROLE — ONGOING PA MODE ━━━
 You are ${profile.mum_name}'s knowledgeable personal assistant, available on WhatsApp.
@@ -328,7 +361,7 @@ HOUSEHOLD:
 - Cleaner: ${h.cleaner_name || 'not set'}${h.cleaner_day ? `, comes on ${h.cleaner_day}` : ''}
 - Bin day: ${h.bin_day || 'not set'}
 ${trades ? `Tradespeople:\n${trades}` : ''}
-${calendarSection}${notesSection}${gcalEvents.length > 0 ? `\nGOOGLE CALENDAR — LIVE (treat as authoritative for scheduling questions):\n${gcalEvents.map(e => `  ${e.date} ${e.time !== 'All day' ? e.time : '(all day)'}: ${e.title}`).join('\n')}` : ''}
+${calendarSection}${notesSection}${remindersSection}${gcalEvents.length > 0 ? `\nGOOGLE CALENDAR — LIVE (treat as authoritative for scheduling questions):\n${gcalEvents.map(e => `  ${e.date} ${e.time !== 'All day' ? e.time : '(all day)'}: ${e.title}`).join('\n')}` : ''}
 EXTRA NOTES: ${p.extra_notes || 'none'}
 
 ━━━ WHAT YOU CAN ACTUALLY DO ━━━
@@ -356,16 +389,16 @@ COMMUNICATION STYLE: ${style}
 - If you don't know something she'd expect you to know, ask one clear question to fill the gap.
 - Never say you "can't" do something — find the best version of help you can offer.
 
-MEMORY & SAVING:
-- Saving runs as a separate background step AFTER your reply is written. You never see whether it
-  succeeded, so you are not in a position to report that it did.
-- Confirm the INTENT, never a completed write. Say "I'll set that for 18:28" or "Noting Ellie's
-  school trip on Tuesday" — NOT "Saved!", "Done", or "I've updated it", which claim knowledge you
-  do not have and mislead her when the write fails.
-- Do this for: upcoming events, schedule changes, new tradespeople, reminders, anything that sounds like it should be remembered.
-- Keep the confirmation brief — one line at the end of your reply is enough.
-- If she corrects something she just told you ("sorry, I meant 18:28"), restate the corrected
-  version back to her so it is unambiguous which version you are acting on.`;
+SAVING — DO NOT CLAIM IT:
+- Saving is handled by a separate system, and its result is appended to your reply
+  automatically as a "✅ Saved:" line that she will see.
+- So NEVER say you have saved, noted, updated, remembered or will remember anything.
+  No "I'll note that down", no "I'll update that", no "saved!", no "got it — noted".
+  You do not know whether the write succeeded, and claiming it when it did not is
+  worse than saying nothing.
+- Just answer her. If she tells you something new, respond to the substance of it and
+  let the receipt speak for the saving.
+`;
 }
 
 // ── Onboarding ────────────────────────────────────────────────────────────────
@@ -430,22 +463,53 @@ async function handleOnboarding(phone, body, state) {
 }
 
 // ── Info extractor ────────────────────────────────────────────────────────────
+// Returns { saved: [label], failed: [{label, reason}] } so the caller can build a
+// receipt from what actually happened, rather than letting the model assert it.
+const PROFILE_FIELDS = ['activities', 'school', 'year_group', 'dietary_needs', 'allergies', 'extra_needs'];
+
 async function extractAndSave(message, profile) {
   const today = new Date().toISOString().split('T')[0];
   const number = profile.whatsapp_number;
+  const result = { saved: [], failed: [] };
   // Truncate long forwarded messages — Haiku only needs enough to identify events
   const excerpt = message.length > 1200 ? message.slice(0, 1200) + '…' : message;
 
+  // The model can only return a correct replacement value if it can see the
+  // current one — otherwise "PE is Tuesday and Wednesday" would wipe "Chess Friday".
+  const childLines = (profile.children || []).map(c =>
+    `  - ${c.name}: activities=${JSON.stringify(c.activities || '')}, school=${JSON.stringify(c.school || '')}, year_group=${JSON.stringify(c.year_group || '')}, dietary_needs=${JSON.stringify(c.dietary_needs || '')}, allergies=${JSON.stringify(c.allergies || '')}, extra_needs=${JSON.stringify(c.extra_needs || '')}`
+  ).join('\n') || '  (no children on file)';
+
   const extraction = await anthropic.messages.create({
     model:      'claude-haiku-4-5-20251001',
-    max_tokens: 500,
+    max_tokens: 800,
     messages: [{
       role: 'user',
       content: `Today is ${today}. Day of week: ${new Date().toLocaleDateString('en-GB', { weekday: 'long' })}.
 The user said: "${excerpt}"
 
+CURRENT PROFILE:
+${childLines}
+
 Does this message contain new information worth saving to their family profile?
 New info includes: upcoming events, schedule changes, new or visiting tradespeople, activity changes for children, reminders, anything they want to track.
+
+There are two places information can go:
+1. "notes" — things that happen, and standing facts. A note with a specific date is an
+   event; a note with date null is a STANDING FACT that stays true (e.g. "PE is Tuesday
+   and Wednesday", "bin day is Thursday"). Both are kept.
+2. "profile_updates" — durable structured facts about a CHILD that belong on their record.
+   Use this for recurring schedule facts such as PE days, clubs and activities.
+
+PROFILE UPDATE RULES:
+- "field" must be one of: ${PROFILE_FIELDS.join(', ')}
+- "child" must exactly match a name in CURRENT PROFILE above
+- "value" is the COMPLETE NEW VALUE for that field, not a fragment. Start from the current
+  value shown above and merge the new information into it, preserving anything still true.
+  Example: current activities "Chess Friday 07:45" + "Ellie's PE is Tuesday and Wednesday"
+  → value "Chess Friday 07:45; PE Tuesday and Wednesday"
+- Only include a profile_update when the user states a durable fact about a child.
+  Do not use it for one-off events.
 
 IMPORTANT DATE RULES:
 - Always resolve relative dates to absolute YYYY-MM-DD using today's date (${today})
@@ -465,7 +529,9 @@ Return ONLY valid JSON, no markdown, no explanation:
       "raw": "exact phrase from the message"
     }
   ],
-  "profile_updates": []
+  "profile_updates": [
+    { "child": "child's name", "field": "one of the allowed fields", "value": "complete new value" }
+  ]
 }
 
 If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": []}`
@@ -479,37 +545,96 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
   } catch (e) {
     console.error(`❌ Note extraction returned unparseable JSON for ${number}: ${e.message}`);
     console.error(`   Raw model output was: ${raw.slice(0, 500)}`);
-    return;
+    result.failed.push({ label: 'anything from that message', reason: 'could not read the extraction result' });
+    return result;
   }
 
-  if (!parsed.has_new_info || !parsed.notes?.length) return;
+  const notes          = parsed.notes || [];
+  const profileUpdates = parsed.profile_updates || [];
+  if (!parsed.has_new_info || (!notes.length && !profileUpdates.length)) return result;
 
-  // Load existing notes and merge
-  const { data } = await supabase
+  // Load once — both notes and children are written back to the same row.
+  const { data: current, error: loadErr } = await supabase
     .from('profiles')
-    .select('notes')
+    .select('notes, children')
     .eq('whatsapp_number', number)
     .single();
 
-  const existing = data?.notes || [];
-  const newNotes = parsed.notes.map(n => ({
-    ...n,
-    saved_at: today,
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-  }));
-
-  const { error: notesErr } = await supabase
-    .from('profiles')
-    .update({ notes: [...existing, ...newNotes] })
-    .eq('whatsapp_number', number);
-
-  if (notesErr) {
-    console.error(`❌ Note UPDATE FAILED for ${number}: ${notesErr.message}`);
-    console.error(`   Would have saved: ${newNotes.map(n => n.title).join(', ')}`);
-    return;
+  if (loadErr) {
+    console.error(`❌ Could not load profile for ${number} before saving: ${loadErr.message}`);
+    result.failed.push({ label: 'your update', reason: 'could not read your profile' });
+    return result;
   }
 
-  console.log(`💾 Saved ${newNotes.length} note(s) for ${profile.mum_name}:`, newNotes.map(n => n.title).join(', '));
+  // ── notes ──────────────────────────────────────────────────────────────────
+  if (notes.length) {
+    const existing = current?.notes || [];
+    const newNotes = notes.map(n => ({
+      ...n,
+      saved_at: today,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    }));
+
+    const { error: notesErr } = await supabase
+      .from('profiles')
+      .update({ notes: [...existing, ...newNotes] })
+      .eq('whatsapp_number', number);
+
+    if (notesErr) {
+      console.error(`❌ Note UPDATE FAILED for ${number}: ${notesErr.message}`);
+      console.error(`   Would have saved: ${newNotes.map(n => n.title).join(', ')}`);
+      for (const n of newNotes) result.failed.push({ label: n.title, reason: notesErr.message });
+    } else {
+      console.log(`💾 Saved ${newNotes.length} note(s) for ${profile.mum_name}:`, newNotes.map(n => n.title).join(', '));
+      for (const n of newNotes) result.saved.push(n.title);
+    }
+  }
+
+  // ── profile updates ────────────────────────────────────────────────────────
+  if (profileUpdates.length) {
+    const children = JSON.parse(JSON.stringify(current?.children || []));
+    const applied = [];
+
+    for (const u of profileUpdates) {
+      if (!PROFILE_FIELDS.includes(u.field)) {
+        console.error(`❌ Profile update REJECTED for ${number} — field ${JSON.stringify(u.field)} is not updatable (allowed: ${PROFILE_FIELDS.join(', ')})`);
+        result.failed.push({ label: `${u.child || 'profile'} ${u.field}`, reason: 'not an updatable field' });
+        continue;
+      }
+      const idx = children.findIndex(c => (c.name || '').toLowerCase() === String(u.child || '').toLowerCase());
+      if (idx === -1) {
+        console.error(`❌ Profile update REJECTED for ${number} — no child named ${JSON.stringify(u.child)} (have: ${children.map(c => c.name).join(', ') || 'none'})`);
+        result.failed.push({ label: `${u.child} ${u.field}`, reason: `no child named ${u.child}` });
+        continue;
+      }
+      const before = children[idx][u.field] || '';
+      if (before === u.value) {
+        console.log(`   Profile update for ${children[idx].name}.${u.field} is unchanged — skipping`);
+        continue;
+      }
+      children[idx][u.field] = u.value;
+      applied.push({ name: children[idx].name, field: u.field, before, after: u.value });
+    }
+
+    if (applied.length) {
+      const { error: childErr } = await supabase
+        .from('profiles')
+        .update({ children })
+        .eq('whatsapp_number', number);
+
+      if (childErr) {
+        console.error(`❌ Profile UPDATE FAILED for ${number}: ${childErr.message}`);
+        for (const a of applied) result.failed.push({ label: `${a.name} ${a.field}`, reason: childErr.message });
+      } else {
+        for (const a of applied) {
+          console.log(`💾 Profile updated for ${a.name}.${a.field}: ${JSON.stringify(a.before)} → ${JSON.stringify(a.after)}`);
+          result.saved.push(`${a.name} ${a.field.replace(/_/g, ' ')} → ${a.after}`);
+        }
+      }
+    }
+  }
+
+  return result;
 }
 
 // ── Claude reply ──────────────────────────────────────────────────────────────
@@ -526,6 +651,24 @@ function trimHistory(history) {
     total += len;
   }
   return trimmed;
+}
+
+// The receipt is built from what the writes actually returned, never from the
+// model's prose. If nothing was written, nothing is said.
+function formatWriteReceipt(receipt) {
+  if (!receipt) return '';
+  const { saved = [], failed = [] } = receipt;
+  if (!saved.length && !failed.length) return '';
+
+  let out = '';
+  if (saved.length === 1)      out += `\n\n✅ Saved: ${saved[0]}`;
+  else if (saved.length > 1)   out += `\n\n✅ Saved:\n${saved.map(s => `• ${s}`).join('\n')}`;
+
+  if (failed.length === 1)     out += `\n\n⚠️ Couldn't save ${failed[0].label} — ${failed[0].reason}`;
+  else if (failed.length > 1)  out += `\n\n⚠️ Couldn't save:\n${failed.map(f => `• ${f.label} — ${f.reason}`).join('\n')}`;
+
+  if (failed.length) console.error(`⚠️  Reported ${failed.length} write failure(s) to the user`);
+  return out;
 }
 
 // Any reminder the scheduler had to drop as stale is reported to the user the
@@ -560,7 +703,33 @@ async function pendingStaleNotice(whatsappNumber) {
   return `⚠️ Heads up — ${noun}, because the date had already passed:\n${lines}\n\n`;
 }
 
-async function getClaudeReply(from, userMessage, profile, gcalEvents = []) {
+// Loads the reminders the scheduler would actually act on, so the prompt shows
+// the same truth the scheduler uses.
+async function loadActiveReminders(whatsappNumber) {
+  const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  const { data, error } = await supabase
+    .from('reminders')
+    .select('context, schedule_time, frequency, start_date, end_date')
+    .eq('whatsapp_number', whatsappNumber)
+    .eq('type', 'reminder')
+    .eq('active', true)
+    .order('start_date', { ascending: true })
+    .limit(40);
+
+  if (error) {
+    console.error(`⚠️  Could not load active reminders for ${whatsappNumber}: ${error.message}`);
+    console.error(`   The assistant will answer without reminder data this turn.`);
+    return [];
+  }
+  // A 'once' reminder whose day has passed will never fire (the scheduler drops
+  // it), so showing it would misrepresent what is actually scheduled.
+  const live = (data || []).filter(r => !(r.frequency === 'once' && r.start_date < todayISO));
+  const hidden = (data || []).length - live.length;
+  if (hidden > 0) console.log(`   loadActiveReminders: withheld ${hidden} past-dated one-off(s) that can no longer fire`);
+  return live;
+}
+
+async function getClaudeReply(from, userMessage, profile, gcalEvents = [], activeReminders = []) {
   if (!conversations[from]) conversations[from] = [];
   conversations[from].push({ role: 'user', content: userMessage });
 
@@ -569,7 +738,7 @@ async function getClaudeReply(from, userMessage, profile, gcalEvents = []) {
   const response = await anthropic.messages.create({
     model:      'claude-sonnet-4-6',
     max_tokens: isLongMessage ? 800 : 400,
-    system:     buildSystemPrompt(profile, gcalEvents),
+    system:     buildSystemPrompt(profile, gcalEvents, activeReminders),
     messages:   trimHistory(conversations[from]),
   });
 
@@ -857,6 +1026,7 @@ async function generateReminderContent(reminder, profile) {
 // extractor found nothing and silently did nothing — while the chat model, which
 // DOES have history, told the user it had been updated.
 async function extractReminder(message, profile, history = []) {
+  const receipt = { saved: [], failed: [] };
   const now    = new Date();
   const today  = now.toISOString().split('T')[0];
   const dayName = now.toLocaleDateString('en-GB', { weekday: 'long' });
@@ -945,12 +1115,13 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
   } catch (e) {
     console.error(`❌ Reminder extraction returned unparseable JSON for ${profile.whatsapp_number}: ${e.message}`);
     console.error(`   Raw model output was: ${raw.slice(0, 500)}`);
-    return;
+    receipt.failed.push({ label: 'a reminder from that message', reason: 'could not read the extraction result' });
+    return receipt;
   }
 
   if (!parsed.has_reminder || !parsed.reminders?.length) {
     console.log(`   No reminder detected in message from ${profile.whatsapp_number}`);
-    return;
+    return receipt;
   }
 
   for (const r of parsed.reminders) {
@@ -960,11 +1131,17 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
     if (action === 'cancel') {
       if (!existingById.has(r.id)) {
         console.error(`❌ Reminder CANCEL IGNORED for ${profile.whatsapp_number} — id ${JSON.stringify(r.id)} is not one of this user's active reminders`);
+        receipt.failed.push({ label: 'cancelling that reminder', reason: 'could not find it' });
         continue;
       }
       const { error } = await supabase.from('reminders').update({ active: false }).eq('id', r.id);
-      if (error) console.error(`❌ Reminder CANCEL FAILED for ${profile.whatsapp_number}: ${error.message}`);
-      else       console.log(`⏰ Reminder cancelled: ${r.id} ("${existingById.get(r.id).context}") for ${profile.whatsapp_number}`);
+      if (error) {
+        console.error(`❌ Reminder CANCEL FAILED for ${profile.whatsapp_number}: ${error.message}`);
+        receipt.failed.push({ label: `cancelling "${existingById.get(r.id).context}"`, reason: error.message });
+      } else {
+        console.log(`⏰ Reminder cancelled: ${r.id} ("${existingById.get(r.id).context}") for ${profile.whatsapp_number}`);
+        receipt.saved.push(`cancelled reminder "${existingById.get(r.id).context}"`);
+      }
       continue;
     }
 
@@ -972,6 +1149,7 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
     if (!scheduleTime) {
       console.error(`❌ Reminder DROPPED for ${profile.whatsapp_number} — unusable schedule_time ${JSON.stringify(r.schedule_time)}`);
       console.error(`   Action was "${action}", context "${r.context}"`);
+      receipt.failed.push({ label: `reminder "${r.context}"`, reason: `unusable time ${JSON.stringify(r.schedule_time)}` });
       continue;
     }
 
@@ -998,8 +1176,10 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
           console.error(`   id ${r.id}, patch: ${JSON.stringify(patch)}`);
           if (error.details) console.error(`   Details: ${error.details}`);
           if (error.hint)    console.error(`   Hint: ${error.hint}`);
+          receipt.failed.push({ label: `reminder "${patch.context}"`, reason: error.message });
         } else {
           console.log(`⏰ Reminder updated: ${r.id} — "${prev.context}" at ${prev.schedule_time} → "${patch.context}" at ${patch.schedule_time} (${patch.frequency}) for ${profile.whatsapp_number}`);
+          receipt.saved.push(`reminder "${patch.context}" moved to ${patch.schedule_time}`);
         }
         continue;
       }
@@ -1022,10 +1202,14 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
       console.error(`   Payload: ${JSON.stringify({ context: r.context, schedule_time: scheduleTime, frequency: r.frequency || 'once', start_date: r.start_date || today, end_date: r.end_date || null })}`);
       if (error.details) console.error(`   Details: ${error.details}`);
       if (error.hint)    console.error(`   Hint: ${error.hint}`);
+      receipt.failed.push({ label: `reminder "${r.context}"`, reason: error.message });
     } else {
       console.log(`⏰ Reminder saved: "${r.context}" at ${scheduleTime} (${r.frequency || 'once'}) for ${profile.whatsapp_number}`);
+      receipt.saved.push(`reminder "${r.context}" at ${scheduleTime}${r.frequency && r.frequency !== 'once' ? ` (${r.frequency})` : ''}`);
     }
   }
+
+  return receipt;
 }
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -1448,12 +1632,27 @@ app.post('/webhook', async (req, res) => {
       console.log(`⚠️  No profile found for ${from} — using generic prompt`);
     }
 
-    // Fire extraction + reminder detection in background — never delay the Twilio response
+    // These are AWAITED, not fired and forgotten. The reply must not be composed
+    // before the system knows what was actually written — otherwise any claim it
+    // makes about saving is a guess about work still in flight.
+    let writeReceipt = { saved: [], failed: [] };
     if (profile) {
-      extractAndSave(body, profile).catch(e => console.error('⚠️ Extract error:', e.message));
       // conversations[from] holds prior turns only — getClaudeReply appends the
       // current message later — so pass `body` separately as the new message.
-      extractReminder(body, profile, conversations[from] || []).catch(e => console.error('⚠️ Reminder extract error:', e.message));
+      const [infoResult, reminderResult] = await Promise.all([
+        extractAndSave(body, profile).catch(e => {
+          console.error('⚠️ Extract error:', e.message);
+          return { saved: [], failed: [{ label: 'that update', reason: e.message }] };
+        }),
+        extractReminder(body, profile, conversations[from] || []).catch(e => {
+          console.error('⚠️ Reminder extract error:', e.message);
+          return { saved: [], failed: [{ label: 'that reminder', reason: e.message }] };
+        }),
+      ]);
+      writeReceipt = {
+        saved:  [...infoResult.saved,  ...reminderResult.saved],
+        failed: [...infoResult.failed, ...reminderResult.failed],
+      };
     } else {
       // No profile means reminders are never even attempted — make that loud, and
       // print both forms of the number so a normalisation mismatch is obvious.
@@ -1488,7 +1687,11 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    const reply = await getClaudeReply(from, body, profile, gcalEvents);
+    // Loaded AFTER the writes above, so a reminder created by this very message
+    // is already visible to the reply rather than appearing only next time.
+    const activeReminders = profile ? await loadActiveReminders(profile.whatsapp_number) : [];
+
+    const reply = await getClaudeReply(from, body, profile, gcalEvents, activeReminders);
     console.log(`📤 Claude: ${reply}`);
 
     // Prepend deterministically rather than asking the model to mention it —
@@ -1496,7 +1699,7 @@ app.post('/webhook', async (req, res) => {
     const staleNotice = profile ? await pendingStaleNotice(profile.whatsapp_number) : '';
 
     res.type('text/xml');
-    res.send(buildTwimlResponse(staleNotice + reply));
+    res.send(buildTwimlResponse(staleNotice + reply + formatWriteReceipt(writeReceipt)));
   } catch (err) {
     console.error('❌ Error:', err.message);
     res.type('text/xml');

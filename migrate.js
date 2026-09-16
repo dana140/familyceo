@@ -34,6 +34,11 @@ create table if not exists reminders (
   created_at timestamptz default now()
 );
 
+-- When the user last messaged us. WhatsApp's 24-hour customer service window
+-- opens on an inbound message, and nothing recorded that, so there was no way to
+-- know whether a free-form briefing would be accepted or rejected with 63016.
+alter table profiles add column if not exists last_inbound_at timestamptz;
+
 -- Bookkeeping for reminders the scheduler had to drop as stale, so they can be
 -- surfaced to the user rather than disappearing.
 alter table reminders add column if not exists stale_skipped_at  timestamptz;

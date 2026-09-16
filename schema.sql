@@ -10,6 +10,7 @@ create table if not exists profiles (
   children jsonb default '[]'::jsonb,
   household jsonb default '{}'::jsonb,
   preferences jsonb default '{}'::jsonb,
+  last_inbound_at timestamptz,   -- opens WhatsApp's 24h free-form window
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );

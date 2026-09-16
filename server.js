@@ -197,6 +197,25 @@ function toWhatsAppMarkup(text) {
   return out;
 }
 
+// ── WhatsApp 24-hour window ───────────────────────────────────────────────────
+// The window opens when the USER messages us and lasts 24 hours. Inside it,
+// free-form messages are fine. Outside it, only approved templates go through.
+const WINDOW_MS = 24 * 60 * 60 * 1000;
+// A margin, because a briefing that starts composing at 23h58m would be sent
+// after the window shuts.
+const WINDOW_MARGIN_MS = 10 * 60 * 1000;
+
+function windowIsOpen(lastInboundAt) {
+  if (!lastInboundAt) return false;
+  const age = Date.now() - new Date(lastInboundAt).getTime();
+  return age >= 0 && age < (WINDOW_MS - WINDOW_MARGIN_MS);
+}
+function windowAge(lastInboundAt) {
+  if (!lastInboundAt) return 'never messaged';
+  const h = (Date.now() - new Date(lastInboundAt).getTime()) / 3600000;
+  return `last inbound ${h.toFixed(1)}h ago`;
+}
+
 // ── Outbound sender ───────────────────────────────────────────────────────────
 // TWILIO_SANDBOX was the shared Twilio sandbox number. The real sender is now
 // +447482788150. Set TWILIO_WHATSAPP_FROM in Railway to switch; the old variable
@@ -1981,6 +2000,33 @@ RULES:
   return response.content[0].text;
 }
 
+// How many things are actually on today — the nudge states a number, so it has
+// to be counted rather than guessed.
+async function countTodaysItems(profile) {
+  const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  const notes = (profile.notes || []).filter(n => n.date === todayISO && !n.superseded_at).length;
+  const { data: rem, error } = await supabase
+    .from('reminders')
+    .select('id, frequency, start_date')
+    .eq('whatsapp_number', profile.whatsapp_number)
+    .eq('type', 'reminder').eq('active', true);
+  if (error) {
+    console.error(`⚠️  Could not count today's reminders: ${error.message}`);
+    return notes;
+  }
+  const due = (rem || []).filter(r => r.frequency === 'once' ? r.start_date === todayISO : r.start_date <= todayISO).length;
+  return notes + due;
+}
+
+// Until the template is approved this still goes out free-form, so outside the
+// window it will be rejected like anything else — but it is short, and once the
+// Content SID exists only this call has to change.
+async function sendBriefingNudge(profile, count) {
+  const name = profile.mum_name || 'there';
+  const body = `Good morning ${name} 👋 You have ${count} thing${count === 1 ? '' : 's'} on today. Reply MORNING and I'll send the details.`;
+  await sendWhatsApp(profile.whatsapp_number, body);
+}
+
 // ── Reminder content generator ────────────────────────────────────────────────
 async function generateReminderContent(reminder, profile) {
   const now      = new Date();
@@ -2372,6 +2418,22 @@ async function runScheduler() {
     }
 
     try {
+      // Inside the window a full free-form briefing is allowed. Outside it,
+      // only an approved template will be delivered — so send the nudge, which
+      // reopens the window when she replies MORNING.
+      const open = windowIsOpen(profile.last_inbound_at);
+      console.log(`   📬 Briefing path for ${profile.mum_name}: ${open ? 'FULL (24h window open)' : 'NUDGE (24h window closed)'} — ${windowAge(profile.last_inbound_at)}`);
+
+      if (!open) {
+        const count = await countTodaysItems(profile);
+        await sendBriefingNudge(profile, count);
+        await supabase.from('profiles').update({
+          preferences: { ...profile.preferences, last_briefing_date: todayISO },
+        }).eq('whatsapp_number', profile.whatsapp_number);
+        console.log(`   ✅ Briefing NUDGE sent to ${profile.mum_name} (${count} item(s) today)`);
+        continue;
+      }
+
       const briefing = await generateBriefing(profile);
       await sendWhatsApp(profile.whatsapp_number, briefing);
       await supabase.from('profiles').update({
@@ -2723,6 +2785,68 @@ app.post('/webhook', async (req, res) => {
     // a fixed string, and never come close to the limit.
     ackTwilio(res, startedAt);
 
+    // ── Keyword replies ───────────────────────────────────────────────────────
+    // These are commands, not information, so they run before any extraction —
+    // "MORNING" must never be saved as a note.
+    const keyword = body.trim().toUpperCase().replace(/[^A-Z]/g, '');
+
+    if (keyword === 'MORNING') {
+      const profile = await loadProfile(from);
+      if (!profile) { await sendWhatsApp(from, "I don't have a profile for this number yet."); return; }
+      console.log(`   ☀️  MORNING requested by ${profile.mum_name} — sending the full briefing (this message reopened the window)`);
+      try {
+        const briefing = await generateBriefing(profile);
+        await sendWhatsApp(profile.whatsapp_number, briefing);
+        console.log(`⏱️  MORNING handled in ${Date.now() - startedAt}ms`);
+      } catch (e) {
+        console.error(`❌ MORNING briefing failed for ${profile.mum_name}: ${e.message}`);
+        await sendWhatsApp(from, "Sorry, I couldn't put your briefing together just then. Try again in a moment?");
+      }
+      return;
+    }
+
+    if (keyword === 'DONE') {
+      const profile = await loadProfile(from);
+      if (!profile) { await sendWhatsApp(from, "I don't have a profile for this number yet."); return; }
+      const { data: recent, error: rErr } = await supabase
+        .from('reminders')
+        .select('id, context, frequency, last_sent_at')
+        .eq('whatsapp_number', profile.whatsapp_number)
+        .eq('type', 'reminder')
+        .not('last_sent_at', 'is', null)
+        .order('last_sent_at', { ascending: false })
+        .limit(1);
+
+      if (rErr) {
+        console.error(`❌ DONE lookup failed for ${profile.whatsapp_number}: ${rErr.message}`);
+        await sendWhatsApp(from, "I couldn't reach your reminders just then — try again in a moment?");
+        return;
+      }
+      const r = (recent || [])[0];
+      if (!r) {
+        console.log(`   ✔️  DONE from ${profile.mum_name} but no reminder has been sent yet — nothing to close`);
+        await sendWhatsApp(from, "Nothing to mark off — I haven't sent you a reminder yet.");
+        return;
+      }
+      // A one-off is finished. A recurring series is not — only today's
+      // occurrence is, and last_sent_at already stops it repeating today.
+      if (r.frequency === 'once') {
+        const { error } = await supabase.from('reminders').update({ active: false }).eq('id', r.id);
+        if (error) {
+          console.error(`❌ DONE could not close reminder ${r.id}: ${error.message}`);
+          await sendWhatsApp(from, "I couldn't mark that off just then — try again in a moment?");
+          return;
+        }
+        console.log(`   ✔️  DONE — closed one-off reminder ${r.id}: "${r.context}"`);
+        await sendWhatsApp(from, `Marked off: ${cleanTitle(r.context)} ✅`);
+      } else {
+        console.log(`   ✔️  DONE — "${r.context}" is a ${r.frequency} reminder, so today's is done but the series continues`);
+        await sendWhatsApp(from, `Marked off for today: ${cleanTitle(r.context)} ✅ (it'll come round again — say "stop reminding me about that" to end it.)`);
+      }
+      console.log(`⏱️  DONE handled in ${Date.now() - startedAt}ms`);
+      return;
+    }
+
     // ── Fully onboarded — AI flow ─────────────────────────────────────────────
     // Test trigger: resend capabilities message
     if (body.trim().toLowerCase() === 'highlighter') {
@@ -2787,6 +2911,11 @@ app.post('/webhook', async (req, res) => {
     const profile = await loadProfile(from);
     if (profile) {
       console.log(`👤 Profile loaded for ${profile.mum_name || from}`);
+      // This inbound message opens a fresh 24-hour free-form window.
+      supabase.from('profiles')
+        .update({ last_inbound_at: new Date().toISOString() })
+        .eq('whatsapp_number', profile.whatsapp_number)
+        .then(({ error }) => { if (error) console.error(`⚠️  Could not record last_inbound_at: ${error.message}`); });
     } else {
       console.log(`⚠️  No profile found for ${from} — using generic prompt`);
     }

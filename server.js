@@ -181,6 +181,45 @@ function toWhatsAppMarkup(text) {
   return out;
 }
 
+// ── WhatsApp length limits ────────────────────────────────────────────────────
+// Twilio rejects any body over 1600 characters with error 21617 — and it is a
+// hard rejection, not a truncation, so an over-length message is NOT DELIVERED
+// AT ALL. The model output is bounded by max_tokens, but the stale notice,
+// receipt and pending-cancel blocks are appended afterwards with no budget, and
+// together they can push a normal reply past the limit. Splitting here makes
+// over-length structurally impossible rather than merely unlikely.
+const WHATSAPP_HARD_LIMIT = 1600;
+const WHATSAPP_SPLIT_AT   = 1500;   // headroom for the "(1/3) " marker
+const TWIML_MAX_MESSAGES  = 10;     // Twilio caps <Message> elements per response
+
+function splitForWhatsApp(text, target = WHATSAPP_SPLIT_AT) {
+  const src = String(text ?? '');
+  if (src.length <= WHATSAPP_HARD_LIMIT) return [src];
+
+  const raw = [];
+  let rest = src;
+  while (rest.length > target) {
+    const window = rest.slice(0, target);
+    let cut = window.lastIndexOf('\n\n');
+    if (cut < target * 0.5) cut = window.lastIndexOf('\n');
+    if (cut < target * 0.5) cut = window.lastIndexOf(' ');
+    if (cut < target * 0.5) cut = target;
+    raw.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).replace(/^[ \t]+/, '').replace(/^\n+/, '\n').trimStart();
+  }
+  if (rest) raw.push(rest);
+
+  const parts = raw.map((p, i) => `(${i + 1}/${raw.length}) ${p}`);
+
+  // Never hand back a part that would still be rejected.
+  const over = parts.filter(p => p.length > WHATSAPP_HARD_LIMIT);
+  if (over.length) {
+    console.error(`🚨 splitForWhatsApp produced ${over.length} part(s) still over ${WHATSAPP_HARD_LIMIT} chars — hard-cutting them`);
+    return parts.map(p => (p.length > WHATSAPP_HARD_LIMIT ? p.slice(0, WHATSAPP_HARD_LIMIT) : p));
+  }
+  return parts;
+}
+
 // ── Profile loader ────────────────────────────────────────────────────────────
 async function loadProfile(whatsappNumber) {
   const normalised = normalisePhone(whatsappNumber);
@@ -356,11 +395,18 @@ BEHAVIOUR:
   const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   // null means "not loaded in this context" — say nothing rather than assert
   // there are none, which would be a false statement in the prompt.
+  const REMINDER_INJECTION_CAP = 25;
+  const shownReminders = (activeReminders || []).slice(0, REMINDER_INJECTION_CAP);
+  const hiddenReminders = (activeReminders || []).length - shownReminders.length;
+  if (hiddenReminders > 0) {
+    console.log(`   buildSystemPrompt: ${(activeReminders || []).length} active reminders, injecting the first ${REMINDER_INJECTION_CAP} and telling the model ${hiddenReminders} are not shown`);
+  }
+
   const remindersSection = activeReminders === null
     ? ''
     : activeReminders.length > 0
     ? `\nACTIVE REMINDERS (the real scheduled reminders — authoritative; never invent others):\n` +
-      activeReminders.map(r => {
+      shownReminders.map(r => {
         const anchorDay = r.start_date ? DAYS[new Date(`${r.start_date}T12:00:00Z`).getUTCDay()] : '';
         const when =
           r.frequency === 'once'     ? `once on ${r.start_date} (${anchorDay})`
@@ -369,7 +415,10 @@ BEHAVIOUR:
         : r.frequency === 'daily'    ? 'every day'
         : r.frequency;
         return `  ${r.schedule_time} ${when}: ${r.context}`;
-      }).join('\n')
+      }).join('\n') +
+      (hiddenReminders > 0
+        ? `\n  …and ${hiddenReminders} more not shown here. If she asks for a full list, say you are showing the soonest ${REMINDER_INJECTION_CAP} and there are ${hiddenReminders} further ones, and offer to narrow by child or date. Never state a total you cannot see.`
+        : '')
     : '\nACTIVE REMINDERS: none are currently set.';
 
   const style = {
@@ -1058,11 +1107,10 @@ async function getClaudeReply(from, userMessage, profile, gcalEvents = [], activ
   if (!conversations[from]) conversations[from] = [];
   conversations[from].push({ role: 'user', content: userMessage });
 
-  const isLongMessage = userMessage.length > 500;
-
   const response = await anthropic.messages.create({
     model:      'claude-sonnet-4-6',
-    max_tokens: isLongMessage ? 800 : 400,
+    max_tokens: 800,  // unconditional: input length is the wrong signal — a short
+                      // question like "what reminders do I have set?" has a long answer
     system:     buildSystemPrompt(profile, gcalEvents, activeReminders),
     messages:   trimHistory(conversations[from]),
   });
@@ -1074,7 +1122,16 @@ async function getClaudeReply(from, userMessage, profile, gcalEvents = [], activ
 
 function buildTwimlResponse(message) {
   const twiml = new twilio.twiml.MessagingResponse();
-  twiml.message(toWhatsAppMarkup(message));
+  const parts = splitForWhatsApp(toWhatsAppMarkup(message));
+
+  if (parts.length > 1) {
+    console.log(`✂️  TwiML reply is ${message.length} chars — returning ${parts.length} <Message> elements`);
+  }
+  if (parts.length > TWIML_MAX_MESSAGES) {
+    console.error(`🚨 TwiML reply needs ${parts.length} parts but Twilio allows ${TWIML_MAX_MESSAGES} — parts ${TWIML_MAX_MESSAGES + 1}-${parts.length} WILL NOT BE SENT`);
+  }
+
+  for (const p of parts.slice(0, TWIML_MAX_MESSAGES)) twiml.message(p);
   return twiml.toString();
 }
 
@@ -1205,11 +1262,42 @@ async function sendWhatsApp(to, body) {
   // Normalise at the outbound boundary too — Twilio rejects anything that
   // isn't E.164, and a non-normalised stored number used to fail silently here.
   const recipient = `whatsapp:${normalisePhone(to)}`;
-  await twilioClient.messages.create({
-    from: process.env.TWILIO_SANDBOX,
-    to:   recipient,
-    body: toWhatsAppMarkup(body),
-  });
+  const parts = splitForWhatsApp(toWhatsAppMarkup(body));
+
+  if (parts.length > 1) {
+    console.log(`✂️  Message to ${recipient} is ${body.length} chars — sending as ${parts.length} parts`);
+  }
+
+  const delivered = [];
+  for (let i = 0; i < parts.length; i++) {
+    try {
+      await twilioClient.messages.create({
+        from: process.env.TWILIO_SANDBOX,
+        to:   recipient,
+        body: parts[i],
+      });
+      delivered.push(i + 1);
+    } catch (e) {
+      // A split that half-succeeds is a failure mode splitting itself creates,
+      // so it must be impossible to miss in the logs.
+      if (delivered.length) {
+        console.error(`🚨 PARTIAL SEND to ${recipient} — the recipient has an INCOMPLETE message.`);
+        console.error(`   Delivered: part(s) ${delivered.join(', ')} of ${parts.length}`);
+        console.error(`   FAILED at part ${i + 1}/${parts.length}: ${e.message}`);
+        if (i + 1 < parts.length) console.error(`   Not attempted: parts ${i + 2}-${parts.length}`);
+        console.error(`   Undelivered content began: ${parts[i].slice(0, 200)}`);
+      } else {
+        console.error(`❌ SEND FAILED to ${recipient} on part 1/${parts.length}: ${e.message}`);
+      }
+      const err = new Error(`WhatsApp send failed at part ${i + 1}/${parts.length}: ${e.message}`);
+      err.partialSend = delivered.length > 0;
+      err.partsDelivered = delivered.length;
+      err.partsTotal = parts.length;
+      throw err;
+    }
+  }
+
+  if (parts.length > 1) console.log(`✅ All ${parts.length} parts delivered to ${recipient}`);
 }
 
 // ── Morning briefing generator (mirrors send-briefing.js) ────────────────────

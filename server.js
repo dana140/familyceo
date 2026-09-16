@@ -237,6 +237,61 @@ function describeSender() {
   return `✅ ${n}${process.env.TWILIO_WHATSAPP_FROM ? '' : ' (via legacy TWILIO_SANDBOX variable)'}`;
 }
 
+// ── WhatsApp templates ────────────────────────────────────────────────────────
+// Outside the 24-hour window only an approved template is delivered, and it must
+// be sent with ContentSid + ContentVariables — Twilio deprecated sending
+// templates via Body in April 2025. Content SIDs are identifiers rather than
+// secrets, so they are defaulted here and overridable per environment.
+const TEMPLATES = {
+  reminder: process.env.TWILIO_TEMPLATE_REMINDER || 'HXe27ed272c94993d4c5f33c001435d753',
+  briefing: process.env.TWILIO_TEMPLATE_BRIEFING || 'HX2d3cee50c9db9b6a8734d7b6e3c060f5',
+};
+
+// Template bodies are fixed at approval time, so a variable carrying a very long
+// value renders badly. Keep them short and say so when trimming.
+function templateVar(v, max = 480) {
+  const t = String(v ?? '').replace(/\s+/g, ' ').trim();
+  if (t.length <= max) return t;
+  console.warn(`   ✂️  Template variable trimmed from ${t.length} to ${max} chars`);
+  return t.slice(0, max - 1).trimEnd() + '…';
+}
+
+// Returns true if delivered. Never throws — the caller decides what an
+// undelivered proactive message means.
+async function sendWhatsAppTemplate(to, contentSid, variables, label) {
+  const recipient = `whatsapp:${normalisePhone(to)}`;
+  if (!contentSid) {
+    console.error(`❌ ${label}: no Content SID configured — cannot send outside the 24-hour window`);
+    return false;
+  }
+  const contentVariables = JSON.stringify(
+    Object.fromEntries(Object.entries(variables).map(([k, v]) => [k, templateVar(v)]))
+  );
+  try {
+    await twilioClient.messages.create({
+      from: whatsappSender(),
+      to: recipient,
+      contentSid,
+      contentVariables,
+    });
+    console.log(`   📨 ${label}: template ${contentSid.slice(0, 10)}… delivered to ${recipient}`);
+    return true;
+  } catch (e) {
+    const code = e?.code;
+    console.error(`🚫 ${label}: TEMPLATE SEND FAILED to ${recipient} — Twilio ${code || '?'}: ${e.message}`);
+    if (code === 63016) {
+      console.error(`   The template was rejected as free-form, which usually means it is NOT YET APPROVED by WhatsApp.`);
+    } else if (code === 63021 || /variable|parameter/i.test(e.message || '')) {
+      console.error(`   Variable mismatch — the template expects a different number of placeholders than ${Object.keys(variables).length}.`);
+    } else if (/not found|invalid.*content/i.test(e.message || '')) {
+      console.error(`   Content SID ${contentSid} was not found. Check it in the Content Template Builder.`);
+    }
+    console.error(`   Variables were: ${contentVariables}`);
+    console.error(`   NOT DELIVERED. Nothing has been marked as sent.`);
+    return false;
+  }
+}
+
 // ── WhatsApp length limits ────────────────────────────────────────────────────
 // Twilio rejects any body over 1600 characters with error 21617 — and it is a
 // hard rejection, not a truncation, so an over-length message is NOT DELIVERED
@@ -2022,9 +2077,11 @@ async function countTodaysItems(profile) {
 // window it will be rejected like anything else — but it is short, and once the
 // Content SID exists only this call has to change.
 async function sendBriefingNudge(profile, count) {
-  const name = profile.mum_name || 'there';
-  const body = `Good morning ${name} 👋 You have ${count} thing${count === 1 ? '' : 's'} on today. Reply MORNING and I'll send the details.`;
-  await sendWhatsApp(profile.whatsapp_number, body);
+  return sendWhatsAppTemplate(
+    profile.whatsapp_number, TEMPLATES.briefing,
+    { 1: profile.mum_name || 'there', 2: String(count) },
+    `Briefing nudge for ${profile.mum_name}`
+  );
 }
 
 // ── Reminder content generator ────────────────────────────────────────────────
@@ -2386,8 +2443,26 @@ async function runScheduler() {
     try {
       const { data: profileRow } = await supabase
         .from('profiles').select('*').eq('whatsapp_number', r.whatsapp_number).single();
-      const content = await generateReminderContent(r, profileRow);
-      await sendWhatsApp(r.whatsapp_number, content);
+
+      const open = windowIsOpen(profileRow?.last_inbound_at);
+      console.log(`      window ${open ? 'OPEN — free-form' : 'CLOSED — template'} (${windowAge(profileRow?.last_inbound_at)})`);
+
+      if (open) {
+        // Inside the window the richer generated message is allowed.
+        const content = await generateReminderContent(r, profileRow);
+        await sendWhatsApp(r.whatsapp_number, content);
+      } else {
+        const ok = await sendWhatsAppTemplate(
+          r.whatsapp_number, TEMPLATES.reminder,
+          { 1: profileRow?.mum_name || 'there', 2: cleanTitle(r.context) },
+          `Reminder ${r.id}`
+        );
+        if (!ok) {
+          console.error(`   🚫 Reminder ${r.id} NOT DELIVERED — left ACTIVE and unsent so it is not silently lost.`);
+          continue;   // no last_sent_at write: nothing was sent
+        }
+      }
+
       await supabase.from('reminders').update({
         last_sent_at: now.toISOString(),
         ...(r.frequency === 'once' ? { active: false } : {}),
@@ -2426,7 +2501,11 @@ async function runScheduler() {
 
       if (!open) {
         const count = await countTodaysItems(profile);
-        await sendBriefingNudge(profile, count);
+        const ok = await sendBriefingNudge(profile, count);
+        if (!ok) {
+          console.error(`   🚫 Briefing nudge NOT DELIVERED to ${profile.mum_name} — last_briefing_date NOT set, so it is not recorded as sent.`);
+          continue;
+        }
         await supabase.from('profiles').update({
           preferences: { ...profile.preferences, last_briefing_date: todayISO },
         }).eq('whatsapp_number', profile.whatsapp_number);
@@ -3114,6 +3193,7 @@ migrate()
       console.log(`   POST http://localhost:${PORT}/upload`);
       console.log(`   ⏰ Scheduler running — checking reminders every minute`);
       console.log(`   WhatsApp sender: ${describeSender()}`);
+      console.log(`   Templates: reminder ${TEMPLATES.reminder ? TEMPLATES.reminder.slice(0, 10) + '…' : '❌ none'}, briefing ${TEMPLATES.briefing ? TEMPLATES.briefing.slice(0, 10) + '…' : '❌ none'}`);
       console.log(`   Supabase key: ${describeSupabaseKey(process.env.SUPABASE_SERVICE_KEY)}`);
       console.log(`   DATABASE_URL: ${process.env.DATABASE_URL ? '✅ set (migrations will run)' : '❌ MISSING (migrations skipped)'}`);
       console.log(`   GOOGLE_CLIENT_ID: ${process.env.GOOGLE_CLIENT_ID ? '✅ set (' + process.env.GOOGLE_CLIENT_ID.slice(0, 8) + '...)' : '❌ MISSING'}`);

@@ -413,8 +413,10 @@ You CAN send messages on your own, without her messaging you first. This is real
 
 NEVER tell her you are unable to send proactive messages, that you can only respond when she
 messages you, or that she should set an alarm on her phone instead. All of that is false, and
-telling her so denies her a core feature she is paying for. If she asks whether you will really
-message her at the time — the answer is yes.
+telling her so denies her a core feature she is paying for. If she asks IN GENERAL whether this
+product can message her, the answer is yes.
+
+That is about the FEATURE. It is not permission to confirm any PARTICULAR request — see below.
 
 ━━━ HOW TO BEHAVE ━━━
 COMMUNICATION STYLE: ${style}
@@ -429,15 +431,35 @@ COMMUNICATION STYLE: ${style}
 - If you don't know something she'd expect you to know, ask one clear question to fill the gap.
 - Never say you "can't" do something — find the best version of help you can offer.
 
-SAVING — DO NOT CLAIM IT:
-- Saving is handled by a separate system, and its result is appended to your reply
-  automatically as a "✅ Saved:" line that she will see.
-- So NEVER say you have saved, noted, updated, remembered or will remember anything.
-  No "I'll note that down", no "I'll update that", no "saved!", no "got it — noted".
-  You do not know whether the write succeeded, and claiming it when it did not is
-  worse than saying nothing.
-- Just answer her. If she tells you something new, respond to the substance of it and
-  let the receipt speak for the saving.
+SAVING — YOU DO NOT KNOW, SO DO NOT SAY:
+Every request she makes is written by a separate system AFTER your reply is composed. You never
+see the outcome. A "✅ Saved:" / "🗑️ Removed:" / "⚠️ Couldn't save" line is appended to your
+message automatically, and THAT is what tells her what happened. Your job is to answer her, not
+to report on storage.
+
+Never state or imply that anything has been done, set, scheduled, saved, removed or cancelled.
+Banned, however natural they feel:
+  "Done" / "Done!" / "Done —"          "That's set" / "All set" / "Already on it"
+  "I'll remind you" / "I'll message you tomorrow"    "You'll get a message from me at 9"
+  "I've removed that" / "I'll get that removed"      "Saved" / "Noted" / "Got it — noted"
+  "That reminder can come off the list"              "Consider it done"
+  "I'll make a note" / "I'll take that off" / "I'll get that updated" / "leave it with me"
+
+The rule is broader than the list: do not describe ANY action — yours or the system's — that
+storage will take as a result of this message. Not in the past tense, not in the future tense,
+not as an intention. The receipt is the only thing that speaks about storage.
+
+Also never claim a reminder EXISTS unless it is listed in ACTIVE REMINDERS above. Ones she has
+only just asked for are not there yet.
+
+What to do instead — reflect the request back in neutral terms and stop:
+  She: "remind me tomorrow at 9 to book Lily's jab"
+  You: "Tomorrow at 9am, to book Lily's jab." — then nothing further about it.
+  She: "you can remove Lily's jab"
+  You: "Right, the jab's no longer needed." — say nothing about what happens to the reminder.
+
+If she asks whether something was actually saved, tell her the receipt line below your message
+is the authoritative answer — not your recollection.
 `;
 }
 
@@ -525,6 +547,31 @@ async function handleOnboarding(phone, body, state) {
 // receipt from what actually happened, rather than letting the model assert it.
 const PROFILE_FIELDS = ['activities', 'school', 'year_group', 'dietary_needs', 'allergies', 'extra_needs'];
 const EXTRACTION_CHUNK_CHARS = 12000;
+
+// Words that carry no identifying signal. A blunt "longer than 3 characters"
+// rule was used before and silently dropped "jab", "PE", "gym", "vet", "nap" —
+// so a removal produced no match terms at all and the fan-out did nothing.
+const MATCH_STOPWORDS = new Set([
+  'the','a','an','and','or','for','to','on','in','at','of','her','his','their','my',
+  'no','not','any','more','longer','anymore','stop','stopped','cancel','cancelled',
+  'remove','removed','drop','dropped','does','doesnt','does not','is','was','be',
+  'this','that','these','those','with','from','it','she','he','they','them',
+]);
+
+function removalMatchTerms(removals) {
+  const terms = new Set();
+  for (const rm of removals) {
+    for (const raw of String(rm.what || '').toLowerCase().split(/[^a-z0-9']+/)) {
+      const w = raw.replace(/'s$/, '').trim();
+      if (w.length >= 2 && !MATCH_STOPWORDS.has(w)) terms.add(w);
+    }
+    // The child's name alone is too broad to match on, but it usefully narrows
+    // a match that already hit on a content word, so keep it available.
+    const child = String(rm.child || '').toLowerCase().trim();
+    if (child.length >= 2) terms.add(child);
+  }
+  return [...terms];
+}
 
 // Split on paragraph, then line, then hard boundaries — never mid-message-and-discard.
 function chunkForExtraction(text, limit) {
@@ -774,9 +821,10 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
 
     // 1. Supersede any note that asserts the removed fact. Flagged in place,
     //    never deleted — the history is what makes this system debuggable.
-    const terms = removals
-      .map(rm => String(rm.what || '').toLowerCase().split(/\s+/).filter(w => w.length > 3))
-      .flat();
+    const terms = removalMatchTerms(removals);
+    if (!terms.length) {
+      console.warn(`⚠️  Removal produced no usable match terms from ${JSON.stringify(removals.map(r => r.what))} — notes and reminders were NOT checked`);
+    }
     if (terms.length) {
       const { data: noteRow } = await supabase
         .from('profiles').select('notes').eq('whatsapp_number', number).single();
@@ -1389,6 +1437,17 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
   for (const r of parsed.reminders) {
     const action = (r.action || 'create').toLowerCase();
 
+    // A message that is really a removal leaves the extractor with nowhere to put
+    // the intent, and it returns an entry with nothing in it. That is not a failed
+    // save — the user never asked to create anything — so log it and move on
+    // rather than telling them a reminder called "null" could not be saved.
+    const hasContext = r.context != null && String(r.context).trim() !== '' && String(r.context).trim().toLowerCase() !== 'null';
+    const hasTime    = r.schedule_time != null && String(r.schedule_time).trim() !== '' && String(r.schedule_time).trim().toLowerCase() !== 'null';
+    if (!hasContext && !hasTime) {
+      console.log(`   Ignoring empty reminder entry (action=${action}) from ${profile.whatsapp_number} — nothing to create or change`);
+      continue;
+    }
+
     // ── cancel ──────────────────────────────────────────────────────────────
     if (action === 'cancel') {
       if (!existingById.has(r.id)) {
@@ -1937,9 +1996,16 @@ app.post('/webhook', async (req, res) => {
           return { saved: [], failed: [{ label: 'that reminder', reason: e.message }] };
         }),
       ]);
+      // One classification wins. If this message was a removal, anything the
+      // reminder extractor thought it should create or change is a misread of
+      // the same sentence — drop it rather than act on both readings.
+      const isRemoval = (infoResult.removals || []).length > 0;
+      if (isRemoval && (reminderResult.saved.length || reminderResult.failed.length)) {
+        console.log(`   Removal detected — discarding ${reminderResult.saved.length} reminder write(s) and ${reminderResult.failed.length} failure(s) from the same message`);
+      }
       writeReceipt = {
-        saved:   [...infoResult.saved,  ...reminderResult.saved],
-        failed:  [...infoResult.failed, ...reminderResult.failed],
+        saved:   [...infoResult.saved,  ...(isRemoval ? [] : reminderResult.saved)],
+        failed:  [...infoResult.failed, ...(isRemoval ? [] : reminderResult.failed)],
         removed: infoResult.removed || [],
         pendingCancels: infoResult.pendingCancels || [],
       };

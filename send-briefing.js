@@ -115,7 +115,7 @@ async function sendBriefing() {
   console.log('------------------------\n');
 
   await twilioClient.messages.create({
-    from: process.env.TWILIO_SANDBOX,
+    from: (process.env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_SANDBOX || '').replace(/^whatsapp:/, 'whatsapp:') || process.env.TWILIO_SANDBOX,
     to:   process.env.MY_WHATSAPP,
     body: briefing,
   });

@@ -197,6 +197,27 @@ function toWhatsAppMarkup(text) {
   return out;
 }
 
+// ── Outbound sender ───────────────────────────────────────────────────────────
+// TWILIO_SANDBOX was the shared Twilio sandbox number. The real sender is now
+// +447482788150. Set TWILIO_WHATSAPP_FROM in Railway to switch; the old variable
+// stays as a fallback so an unset value cannot take sending down mid-migration.
+function whatsappSender() {
+  const raw = process.env.TWILIO_WHATSAPP_FROM || process.env.TWILIO_SANDBOX || '';
+  const n = raw.replace(/^whatsapp:/, '').replace(/\s+/g, '');
+  return n ? `whatsapp:${n.startsWith('+') ? n : '+' + n}` : '';
+}
+
+// Sandbox numbers are shared Twilio test lines; the real sender is a number the
+// business owns. Worth showing at boot so a misconfigured switch is obvious.
+const TWILIO_SANDBOX_NUMBERS = ['+14155238886'];
+function describeSender() {
+  const s = whatsappSender();
+  if (!s) return '❌ MISSING — no TWILIO_WHATSAPP_FROM or TWILIO_SANDBOX set';
+  const n = s.replace('whatsapp:', '');
+  if (TWILIO_SANDBOX_NUMBERS.includes(n)) return `⚠️  ${n} (Twilio SANDBOX — users must send a join code first)`;
+  return `✅ ${n}${process.env.TWILIO_WHATSAPP_FROM ? '' : ' (via legacy TWILIO_SANDBOX variable)'}`;
+}
+
 // ── WhatsApp length limits ────────────────────────────────────────────────────
 // Twilio rejects any body over 1600 characters with error 21617 — and it is a
 // hard rejection, not a truncation, so an over-length message is NOT DELIVERED
@@ -1825,7 +1846,7 @@ async function sendWhatsApp(to, body) {
   for (let i = 0; i < parts.length; i++) {
     try {
       await twilioClient.messages.create({
-        from: process.env.TWILIO_SANDBOX,
+        from: whatsappSender(),
         to:   recipient,
         body: parts[i],
       });
@@ -2938,6 +2959,7 @@ migrate()
       console.log(`   POST http://localhost:${PORT}/webhook`);
       console.log(`   POST http://localhost:${PORT}/upload`);
       console.log(`   ⏰ Scheduler running — checking reminders every minute`);
+      console.log(`   WhatsApp sender: ${describeSender()}`);
       console.log(`   Supabase key: ${describeSupabaseKey(process.env.SUPABASE_SERVICE_KEY)}`);
       console.log(`   DATABASE_URL: ${process.env.DATABASE_URL ? '✅ set (migrations will run)' : '❌ MISSING (migrations skipped)'}`);
       console.log(`   GOOGLE_CLIENT_ID: ${process.env.GOOGLE_CLIENT_ID ? '✅ set (' + process.env.GOOGLE_CLIENT_ID.slice(0, 8) + '...)' : '❌ MISSING'}`);

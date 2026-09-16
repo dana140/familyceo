@@ -1263,6 +1263,16 @@ function addChild(data = {}) {
       </div>
       <div class="field-grid" style="margin-bottom:16px">
         <div class="field">
+          <label>Year Group</label>
+          <input type="text" id="child-year-${id}" placeholder="e.g. 2">
+        </div>
+        <div class="field">
+          <label>Class Teacher</label>
+          <input type="text" id="child-teacher-${id}" placeholder="e.g. Miss Epstein">
+        </div>
+      </div>
+      <div class="field-grid" style="margin-bottom:16px">
+        <div class="field">
           <label>Dietary Requirements</label>
           <div class="tag-input-wrap" onclick="this.querySelector('input').focus()">
             <input class="tag-input" placeholder="Type & press Enter..." onkeydown="addTag(event,this)">
@@ -1295,7 +1305,15 @@ function addChild(data = {}) {
   `;
   document.getElementById('childCards').appendChild(card);
 
-  // Pre-fill school if loading an existing profile
+  // Pre-fill school / year / teacher if loading an existing profile
+  if (data.year_group) {
+    const y = document.getElementById(`child-year-${id}`);
+    if (y) y.value = data.year_group;
+  }
+  if (data.teacher) {
+    const t = document.getElementById(`child-teacher-${id}`);
+    if (t) t.value = data.teacher;
+  }
   if (data.school) {
     const s = document.getElementById(`child-school-${id}`);
     if (s) s.value = data.school;
@@ -1459,6 +1477,8 @@ function getChildrenData() {
     const cid = idMatch ? idMatch[1] : null;
     const name   = cid ? (document.getElementById(`child-name-${cid}`)?.value.trim()   || '') : '';
     const school = cid ? (document.getElementById(`child-school-${cid}`)?.value.trim() || '') : '';
+    const year_group = cid ? (document.getElementById(`child-year-${cid}`)?.value.trim() || '') : '';
+    const teacher = cid ? (document.getElementById(`child-teacher-${cid}`)?.value.trim() || '') : '';
     const dob    = cid ?  document.getElementById(`child-dob-${cid}`)?.value : null;
     const age    = dob ? Math.floor((new Date() - new Date(dob)) / (365.25 * 24 * 60 * 60 * 1000)) : null;
     const clubRows = cid ? Array.from(document.querySelectorAll(`#clubs-${cid} .club-row`)) : [];
@@ -1468,7 +1488,7 @@ function getChildrenData() {
       const time = row.querySelector('.club-time')?.value;
       return [club, day, time].filter(Boolean).join(' ');
     }).filter(Boolean).join(', ');
-    return { name, age, school, activities };
+    return { name, age, school, year_group, teacher, activities };
   }).filter(c => c.name);
 }
 

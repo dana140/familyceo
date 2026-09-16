@@ -608,10 +608,207 @@ async function handleOnboarding(phone, body, state) {
   return NUDGE_MSG;
 }
 
+// ── Formatting + duplicate + timing helpers ───────────────────────────────────
+// UK throughout. "2026-09-24" is not something to show a person.
+function ukDate(iso) {
+  if (!iso) return '';
+  const d = new Date(`${iso}T12:00:00Z`);
+  if (isNaN(d)) return String(iso);
+  // Node's en-GB renders September as "Sept"; the house format is "Sep".
+  return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'Europe/London' })
+          .replace(/\bSept\b/, 'Sep');
+}
+function ukTime(hhmm) {
+  const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return String(hhmm || '');
+  const h = Number(m[1]), min = m[2];
+  const suffix = h < 12 ? 'am' : 'pm';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return min === '00' ? `${h12}${suffix}` : `${h12}.${min}${suffix}`;
+}
+
+function titleKey(t) {
+  return String(t || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+// Same date and a clearly overlapping title. Deliberately conservative: it is
+// better to ask than to silently swallow a genuinely new event.
+function isDuplicateOf(candidate, existing) {
+  if (!candidate.date || candidate.date !== existing.date) return false;
+  const a = titleKey(candidate.title), b = titleKey(existing.title);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.includes(b) || b.includes(a)) return true;
+  const aw = new Set(a.split(' ').filter(w => w.length > 3));
+  const bw = new Set(b.split(' ').filter(w => w.length > 3));
+  if (!aw.size || !bw.size) return false;
+  const shared = [...aw].filter(w => bw.has(w)).length;
+  return shared / Math.min(aw.size, bw.size) >= 0.6;
+}
+
+// Prep reminders belong the evening before, not at the event. Computed here so
+// it cannot drift from whatever the model felt like suggesting.
+const PREP_TIME = '19:00';
+function prepReminderDate(eventISO) {
+  if (!eventISO) return null;
+  const d = new Date(`${eventISO}T12:00:00Z`);
+  if (isNaN(d)) return null;
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+function daysBefore(eventISO, n) {
+  if (!eventISO) return null;
+  const d = new Date(`${eventISO}T12:00:00Z`);
+  if (isNaN(d)) return null;
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+// Only report a mismatch when the values genuinely differ. The bot once claimed
+// an RSVP number did not match and then printed the same number three times.
+function valuesDiffer(a, b) {
+  const norm = v => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const na = norm(a), nb = norm(b);
+  if (!na || !nb) return false;          // nothing to compare is not a mismatch
+  if (na === nb) return false;
+  if (na.length >= 7 && nb.length >= 7) { // phone-like: compare last 9 digits
+    const da = na.replace(/\D/g, ''), db = nb.replace(/\D/g, '');
+    if (da && db && da.slice(-9) === db.slice(-9)) return false;
+  }
+  return true;
+}
+
+// ── Child matcher ─────────────────────────────────────────────────────────────
+// Deciding which child a message is about was left entirely to the model, which
+// had no rule to follow and one candidate to pick from — so a Sinai "Year 2"
+// email was assigned to the only child on file and her year group overwritten.
+// Scored in code instead, from facts that actually identify a child.
+function normaliseSchool(v) {
+  return String(v || '').toLowerCase().replace(/\b(school|primary|junior|infants?)\b/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function normaliseYear(v) {
+  const m = String(v ?? '').match(/\d+/);
+  return m ? m[0] : '';
+}
+
+// Returns { match, candidates, reason, confident }.
+// `confident` is false whenever the caller must ask rather than assume.
+function matchChild(children, signals) {
+  const kids = (children || []).filter(c => c && c.name);
+  if (!kids.length) return { match: null, candidates: [], reason: 'no children on file', confident: false };
+
+  const wantSchool = normaliseSchool(signals.school);
+  const wantYear   = normaliseYear(signals.year_group);
+  const wantName   = String(signals.name || '').toLowerCase().trim();
+  const wantTeacher= String(signals.teacher || '').toLowerCase().trim();
+  const text       = String(signals.text || '').toLowerCase();
+
+  const scored = kids.map(c => {
+    let score = 0;
+    const why = [];
+    const cSchool = normaliseSchool(c.school);
+    const cYear   = normaliseYear(c.year_group);
+
+    if (wantName && String(c.name).toLowerCase() === wantName) { score += 10; why.push('name'); }
+    if (wantSchool && cSchool && cSchool === wantSchool)       { score += 4;  why.push('school'); }
+    if (wantYear   && cYear   && cYear   === wantYear)         { score += 4;  why.push('year group'); }
+    if (wantTeacher && c.teacher && String(c.teacher).toLowerCase() === wantTeacher) { score += 5; why.push('teacher'); }
+
+    // Contradictions are disqualifying, not merely unscored.
+    if (wantSchool && cSchool && cSchool !== wantSchool) { score -= 6; why.push('school MISMATCH'); }
+    if (wantYear   && cYear   && cYear   !== wantYear)   { score -= 6; why.push('year MISMATCH'); }
+
+    if (!wantName && text && text.includes(String(c.name).toLowerCase())) { score += 3; why.push('named in text'); }
+    return { child: c, score, why };
+  }).sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+  const runnerUp = scored[1];
+
+  if (!best || best.score <= 0) {
+    return { match: null, candidates: kids, reason: 'nothing in the message identifies a child', confident: false };
+  }
+  if (runnerUp && runnerUp.score === best.score) {
+    return { match: null, candidates: [best.child, runnerUp.child], reason: `${best.child.name} and ${runnerUp.child.name} both fit equally`, confident: false };
+  }
+  // School + year group together is decisive, as is an explicit name or teacher.
+  const decisive = best.why.includes('name') || best.why.includes('teacher') ||
+                   (best.why.includes('school') && best.why.includes('year group'));
+  return {
+    match: best.child,
+    candidates: kids,
+    reason: `${best.child.name} (${best.why.join(' + ')})`,
+    confident: decisive,
+  };
+}
+
+// Pull the identifying signals a message actually carries. Only these justify
+// overriding the model's choice of child — a message with none of them (a plain
+// "remind me to call the dentist") is left alone.
+function signalsFromMessage(message, children) {
+  const text = String(message || '');
+  const lower = text.toLowerCase();
+
+  let school = '';
+  for (const c of (children || [])) {
+    const cs = normaliseSchool(c.school);
+    if (cs && normaliseSchool(text).includes(cs)) { school = c.school; break; }
+  }
+  const ym = lower.match(/\byear\s*(\d{1,2})\b/);
+  const year_group = ym ? ym[1] : '';
+
+  let teacher = '';
+  for (const c of (children || [])) {
+    const t = String(c.teacher || '').toLowerCase().trim();
+    if (t && lower.includes(t)) { teacher = c.teacher; break; }
+  }
+  return { school, year_group, teacher, text };
+}
+
+// matchChild is the authority. The model suggests a child; when the message
+// carries real identifying signals, code decides — and when those signals do not
+// settle it, nothing is saved and the user is asked.
+function applyChildAuthority(items, message, children, onClarify) {
+  const sig = signalsFromMessage(message, children);
+  const hasSignals = !!(sig.school || sig.year_group || sig.teacher);
+  if (!hasSignals) return { items, overridden: 0, blocked: false };
+
+  const decided = matchChild(children, sig);
+
+  if (decided.confident && decided.match) {
+    let overridden = 0;
+    for (const it of items) {
+      if (it.child && String(it.child).toLowerCase() !== decided.match.name.toLowerCase()) {
+        console.warn(`🔁 CHILD OVERRIDE: model said ${JSON.stringify(it.child)}, matcher says ${decided.match.name} — ${decided.reason}`);
+        overridden++;
+      }
+      it.child = decided.match.name;
+    }
+    if (!overridden) console.log(`   Child confirmed by matcher: ${decided.reason}`);
+    return { items, overridden, blocked: false };
+  }
+
+  // Signals present but inconclusive — ask rather than let the model's guess stand.
+  const names = (decided.candidates || []).map(c => c.name);
+  const q = names.length >= 2
+    ? `Is that ${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}?`
+    : `Which child is that about?`;
+  console.warn(`❓ CHILD AMBIGUOUS — ${decided.reason}. Saving nothing; asking instead.`);
+  onClarify(`${sig.school ? `This looks like a ${sig.school} message` : 'This one'}${sig.year_group ? ` for Year ${sig.year_group}` : ''}. ${q}`);
+  return { items: [], overridden: 0, blocked: true };
+}
+
 // ── Info extractor ────────────────────────────────────────────────────────────
 // Returns { saved: [label], failed: [{label, reason}] } so the caller can build a
 // receipt from what actually happened, rather than letting the model assert it.
-const PROFILE_FIELDS = ['activities', 'school', 'year_group', 'dietary_needs', 'allergies', 'extra_needs'];
+// Directly writable: descriptive facts where a wrong value is easy to spot and
+// harmless to correct.
+const PROFILE_FIELDS = ['activities', 'dietary_needs', 'allergies', 'extra_needs'];
+
+// Identity facts. These decide which child a message belongs to, so a wrong
+// value corrupts every future match — the Year 2 email that rewrote Ellie's
+// year group is exactly this. Extraction may PROPOSE these; only the user's
+// explicit confirmation applies them.
+const GUARDED_PROFILE_FIELDS = ['school', 'year_group', 'name'];
 const EXTRACTION_CHUNK_CHARS = 12000;
 
 // Words that carry no identifying signal. A blunt "longer than 3 characters"
@@ -675,12 +872,13 @@ async function extractAndSave(message, profile) {
   // The model can only return a correct replacement value if it can see the
   // current one — otherwise "PE is Tuesday and Wednesday" would wipe "Chess Friday".
   const childLines = (profile.children || []).map(c =>
-    `  - ${c.name}: activities=${JSON.stringify(c.activities || '')}, school=${JSON.stringify(c.school || '')}, year_group=${JSON.stringify(c.year_group || '')}, dietary_needs=${JSON.stringify(c.dietary_needs || '')}, allergies=${JSON.stringify(c.allergies || '')}, extra_needs=${JSON.stringify(c.extra_needs || '')}`
+    `  - ${c.name}: school=${JSON.stringify(c.school || '')}, year_group=${JSON.stringify(c.year_group || '')}, teacher=${JSON.stringify(c.teacher || '')}, activities=${JSON.stringify(c.activities || '')}, dietary_needs=${JSON.stringify(c.dietary_needs || '')}, allergies=${JSON.stringify(c.allergies || '')}, extra_needs=${JSON.stringify(c.extra_needs || '')}`
   ).join('\n') || '  (no children on file)';
 
   const notesAcc = [];
   const updatesAcc = [];
   const removalsAcc = [];
+  const clarifyAcc = [];
 
   for (let ci = 0; ci < chunks.length; ci++) {
   const excerpt = chunks[ci];
@@ -720,6 +918,23 @@ PROFILE UPDATE RULES:
 - Only include a profile_update when the user states a durable fact about a child.
   Do not use it for one-off events.
 
+WHICH CHILD IS THIS ABOUT:
+- Decide from SCHOOL NAME, YEAR GROUP, CLASS TEACHER and activities in CURRENT PROFILE.
+  School + year group together settle it. So does a named teacher.
+- If the message names a school or year group that matches one child and contradicts another,
+  it is about the matching child. Never assign it to a child whose school or year contradicts it.
+- If nothing identifies a child, or two children fit equally, set "child": null and add
+  "needs_clarification": true with a plain-English "question". Save nothing speculative.
+- NEVER infer that the profile is wrong. If a message says Year 2 and the child you matched is
+  recorded as Year 4, you have matched the WRONG CHILD — do not propose changing her year group.
+- INVITATIONS: the child named on an invitation is usually the BIRTHDAY child, not the recipient.
+  Put their name in "birthday_child", and only set "child" to one of MY children if the invite is
+  addressed to them or they are clearly the guest.
+
+DO NOT INVENT PROBLEMS:
+- Do not report mismatches, conflicts or discrepancies. Comparisons are done in code.
+- Only state what the message actually says.
+
 REMOVAL RULES:
 - When something stops, add BOTH: a "removals" entry naming what ended, AND a
   "profile_updates" entry whose value is the current value with that thing taken out.
@@ -750,7 +965,10 @@ Return ONLY valid JSON, no markdown, no explanation:
   ],
   "removals": [
     { "child": "child's name or null", "field": "field it is being removed from", "what": "short phrase for what is ending" }
-  ]
+  ],
+  "birthday_child": "name on an invitation if this is a party invite, else null",
+  "needs_clarification": true or false,
+  "question": "the plain-English question to ask, if needs_clarification is true"
 }
 
 If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": [], "removals": []}`
@@ -778,15 +996,30 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
       }
       updatesAcc.push(u);
     }
+    if (parsed.needs_clarification && parsed.question) clarifyAcc.push(String(parsed.question));
     for (const rm of (parsed.removals || [])) {
       if (!removalsAcc.some(x => x.what === rm.what && x.child === rm.child)) removalsAcc.push(rm);
     }
   }
   } // end chunk loop
 
-  const notes          = notesAcc;
-  const profileUpdates = updatesAcc;
-  const removals       = removalsAcc;
+  // The matcher decides, not the model — before a single write happens.
+  let notes          = notesAcc;
+  let profileUpdates = updatesAcc;
+  const removals     = removalsAcc;
+
+  const kids = profile.children || [];
+  const noteAuth = applyChildAuthority(notes, message, kids, q => clarifyAcc.push(q));
+  notes = noteAuth.items;
+  const updAuth = applyChildAuthority(profileUpdates, message, kids, q => clarifyAcc.push(q));
+  profileUpdates = updAuth.items;
+  if (noteAuth.blocked || updAuth.blocked) {
+    console.warn(`   Nothing saved from this message — waiting for the user to say which child`);
+  }
+  if (clarifyAcc.length) {
+    console.log(`❓ Extraction needs clarification for ${number}: ${clarifyAcc[0]}`);
+    result.clarify = clarifyAcc[0];
+  }
   result.removals      = removals;
   if (!notes.length && !profileUpdates.length && !removals.length) return result;
   if (removals.length) {
@@ -809,24 +1042,43 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
   // ── notes ──────────────────────────────────────────────────────────────────
   if (notes.length) {
     const existing = current?.notes || [];
-    const newNotes = notes.map(n => ({
+
+    // Same date + overlapping title means we already have it. Reported, never
+    // silently swallowed, and never saved twice.
+    const fresh = [];
+    for (const n of notes) {
+      const dup = existing.find(e => !e.superseded_at && isDuplicateOf(n, e));
+      if (dup) {
+        console.log(`   Duplicate not saved: ${JSON.stringify(n.title)} matches existing ${JSON.stringify(dup.title)} on ${dup.date}`);
+        (result.duplicates = result.duplicates || []).push({ title: n.title, date: n.date, existing: dup.title });
+      } else {
+        fresh.push(n);
+      }
+    }
+    if (!fresh.length) {
+      console.log(`   All ${notes.length} extracted item(s) were already saved — nothing written`);
+    }
+
+    const newNotes = fresh.map(n => ({
       ...n,
       saved_at: today,
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     }));
 
-    const { error: notesErr } = await supabase
-      .from('profiles')
-      .update({ notes: [...existing, ...newNotes] })
-      .eq('whatsapp_number', number);
+    const { error: notesErr } = newNotes.length
+      ? await supabase
+          .from('profiles')
+          .update({ notes: [...existing, ...newNotes] })
+          .eq('whatsapp_number', number)
+      : { error: null };
 
     if (notesErr) {
       console.error(`❌ Note UPDATE FAILED for ${number}: ${notesErr.message}`);
       console.error(`   Would have saved: ${newNotes.map(n => n.title).join(', ')}`);
       for (const n of newNotes) result.failed.push({ label: n.title, reason: notesErr.message });
-    } else {
+    } else if (newNotes.length) {
       console.log(`💾 Saved ${newNotes.length} note(s) for ${profile.mum_name}:`, newNotes.map(n => n.title).join(', '));
-      for (const n of newNotes) result.saved.push(n.title);
+      for (const n of newNotes) result.saved.push({ title: n.title, date: n.date, child: n.child });
     }
   }
 
@@ -836,8 +1088,35 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
     const applied = [];
 
     for (const u of profileUpdates) {
+      if (GUARDED_PROFILE_FIELDS.includes(u.field)) {
+        // Never applied from inference — parked and asked instead.
+        const target = children.find(c => (c.name || '').toLowerCase() === String(u.child || '').toLowerCase());
+        const currentValue = target ? String(target[u.field] ?? '') : '';
+        if (currentValue === String(u.value)) {
+          console.log(`   Proposed ${u.child}.${u.field} matches what is already stored — nothing to ask`);
+          continue;
+        }
+        console.warn(`🛑 GUARDED FIELD NOT WRITTEN: ${u.child}.${u.field} ${JSON.stringify(currentValue)} → ${JSON.stringify(u.value)} — parking for confirmation`);
+        const { error: parkErr } = await supabase.from('pending_profile_changes').insert({
+          whatsapp_number: number,
+          child_name:      String(u.child || ''),
+          field:           u.field,
+          current_value:   currentValue,
+          proposed_value:  String(u.value),
+          evidence:        String(message).slice(0, 400),
+        });
+        if (parkErr) {
+          console.error(`❌ Could not park profile proposal for ${number}: ${parkErr.message}`);
+          result.failed.push({ label: `${u.child} ${u.field}`, reason: parkErr.message });
+        } else {
+          (result.proposals = result.proposals || []).push({
+            child: u.child, field: u.field, from: currentValue, to: String(u.value),
+          });
+        }
+        continue;
+      }
       if (!PROFILE_FIELDS.includes(u.field)) {
-        console.error(`❌ Profile update REJECTED for ${number} — field ${JSON.stringify(u.field)} is not updatable (allowed: ${PROFILE_FIELDS.join(', ')})`);
+        console.error(`❌ Profile update REJECTED for ${number} — field ${JSON.stringify(u.field)} is not updatable (allowed: ${PROFILE_FIELDS.join(', ')}; guarded: ${GUARDED_PROFILE_FIELDS.join(', ')})`);
         result.failed.push({ label: `${u.child || 'profile'} ${u.field}`, reason: 'not an updatable field' });
         continue;
       }
@@ -968,6 +1247,76 @@ function trimHistory(history) {
   return trimmed;
 }
 
+// Guarded profile changes wait here until the user answers in plain English.
+async function resolvePendingProfileChanges(whatsappNumber, message) {
+  const { data: open, error } = await supabase
+    .from('pending_profile_changes')
+    .select('*')
+    .eq('whatsapp_number', whatsappNumber)
+    .is('resolved_at', null)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    console.error(`⚠️  Could not load pending profile changes for ${whatsappNumber}: ${error.message}`);
+    return '';
+  }
+  if (!open?.length) return '';
+
+  const describe = c => `${c.child_name}'s ${c.field.replace(/_/g, ' ')}: ${c.current_value ? `"${c.current_value}" → ` : ''}"${c.proposed_value}"`;
+
+  if (AFFIRMATIVE.test(message)) {
+    const { data: prof, error: pErr } = await supabase
+      .from('profiles').select('children').eq('whatsapp_number', whatsappNumber).single();
+    if (pErr) {
+      console.error(`❌ Could not load profile to apply confirmed changes: ${pErr.message}`);
+      return `\n\n⚠️ I couldn't apply that — ${pErr.message}`;
+    }
+    const children = JSON.parse(JSON.stringify(prof.children || []));
+    const applied = [];
+    for (const c of open) {
+      const idx = children.findIndex(k => (k.name || '').toLowerCase() === c.child_name.toLowerCase());
+      if (idx === -1) {
+        console.error(`❌ Confirmed change references unknown child ${JSON.stringify(c.child_name)} — skipping`);
+        continue;
+      }
+      children[idx][c.field] = c.proposed_value;
+      applied.push(c);
+    }
+    if (applied.length) {
+      const { error: wErr } = await supabase.from('profiles').update({ children }).eq('whatsapp_number', whatsappNumber);
+      if (wErr) {
+        console.error(`❌ Could not write confirmed profile changes: ${wErr.message}`);
+        return `\n\n⚠️ I couldn't apply that — ${wErr.message}`;
+      }
+      await supabase.from('pending_profile_changes')
+        .update({ resolved_at: new Date().toISOString(), resolution: 'confirmed' })
+        .in('id', applied.map(a => a.id));
+      console.log(`✅ Applied ${applied.length} confirmed profile change(s) for ${whatsappNumber}`);
+      return `\n\n✅ Updated: ${applied.map(describe).join('; ')}`;
+    }
+    return '';
+  }
+
+  if (NEGATIVE.test(message)) {
+    await supabase.from('pending_profile_changes')
+      .update({ resolved_at: new Date().toISOString(), resolution: 'declined' })
+      .in('id', open.map(c => c.id));
+    console.log(`↩️  Declined ${open.length} profile change(s) for ${whatsappNumber} — nothing written`);
+    return `\n\n✅ Left as they were — nothing changed.`;
+  }
+
+  // Ask (or re-ask). Nothing is written on an ambiguous reply.
+  await supabase.from('pending_profile_changes')
+    .update({ asked_at: new Date().toISOString() })
+    .in('id', open.map(c => c.id));
+  console.log(`❓ ${open.length} profile change(s) awaiting confirmation for ${whatsappNumber}`);
+  const one = open[0];
+  const q = one.field === 'year_group'
+    ? `This looks like a Year ${one.proposed_value} message${one.current_value ? '' : ''} — is that ${one.child_name}?`
+    : `This looks like it's about ${one.child_name}'s ${one.field.replace(/_/g, ' ')} being "${one.proposed_value}" — is that right?`;
+  return `\n\n❓ ${q} Reply *yes* or *no*. (I haven't changed anything.)`;
+}
+
 // A removal parks matching reminders instead of deactivating them. This resolves
 // that on the user's next message: an explicit yes cancels, anything else keeps
 // them. Either way the user is told what happened.
@@ -1023,25 +1372,55 @@ async function resolvePendingCancels(whatsappNumber, message) {
 // model's prose. If nothing was written, nothing is said.
 function formatWriteReceipt(receipt) {
   if (!receipt) return '';
-  const { saved = [], failed = [], removed = [], pendingCancels = [] } = receipt;
-  if (!saved.length && !failed.length && !removed.length && !pendingCancels.length) return '';
+  const {
+    saved = [], failed = [], removed = [], pendingCancels = [],
+    duplicates = [], proposals = [], reminders = [], mediaFailures = [],
+  } = receipt;
+  const hasClarify = !!receipt.clarify;
 
-  let out = '';
-  if (saved.length === 1)      out += `\n\n✅ Saved: ${saved[0]}`;
-  else if (saved.length > 1)   out += `\n\n✅ Saved:\n${saved.map(s => `• ${s}`).join('\n')}`;
+  if (!saved.length && !failed.length && !removed.length && !pendingCancels.length &&
+      !duplicates.length && !proposals.length && !reminders.length && !mediaFailures.length &&
+      !hasClarify) return '';
 
-  if (removed.length === 1)    out += `\n\n🗑️ Removed: ${removed[0]}`;
-  else if (removed.length > 1) out += `\n\n🗑️ Removed:\n${removed.map(r => `• ${r}`).join('\n')}`;
+  const lines = [];
 
+  // Plain English, UK dates. No ISO strings, no "year group → 2", no raw
+  // reminder payloads — this is read by a person on a phone.
+  for (const item of saved) {
+    if (typeof item === 'string') { lines.push(`Added: ${item}`); continue; }
+    const who  = item.child ? `${item.child}'s ` : '';
+    const when = item.date ? `, ${ukDate(item.date)}` : '';
+    lines.push(`Added to the calendar: ${who}${item.title}${when}`.replace(/\s+,/g, ','));
+  }
+  for (const r of reminders) {
+    lines.push(`I'll remind you at ${ukTime(r.time)} on ${ukDate(r.date)}${r.what ? ` — ${r.what}` : ''}`);
+  }
+  for (const d of duplicates) {
+    lines.push(`Already saved, so not added again: ${d.title}${d.date ? `, ${ukDate(d.date)}` : ''}`);
+  }
+  for (const r of removed) lines.push(`Removed: ${r}`);
+
+  let out = lines.length ? `\n\n${lines.map(l => `• ${l}`).join('\n')}` : '';
+
+  if (mediaFailures.length) {
+    out += `\n\n⚠️ I couldn't read ${mediaFailures.length === 1 ? 'one image' : `${mediaFailures.length} images`}:\n` +
+      mediaFailures.map(m => `• Image ${m.index} — ${m.reason}`).join('\n');
+  }
+  if (failed.length) {
+    out += `\n\n⚠️ I couldn't save:\n` + failed.map(f => `• ${f.label} — ${f.reason}`).join('\n');
+    console.error(`⚠️  Reported ${failed.length} write failure(s) to the user`);
+  }
+  if (receipt.clarify) {
+    out += `\n\n❓ ${receipt.clarify} (Nothing saved yet — tell me which and I'll add it.)`;
+  }
+  if (proposals.length) {
+    const p = proposals[0];
+    out += `\n\n❓ ${p.child}'s ${p.field.replace(/_/g, ' ')} is currently ${p.from ? `"${p.from}"` : 'not set'} — should it be "${p.to}"? Reply *yes* or *no*. (Nothing changed yet.)`;
+  }
   if (pendingCancels.length) {
     out += `\n\n❓ You still have ${pendingCancels.length === 1 ? 'a reminder' : `${pendingCancels.length} reminders`} for this — stop ${pendingCancels.length === 1 ? 'it' : 'them'}? Reply *yes* or *no*:\n` +
-           pendingCancels.map(p => `• "${p.context}" at ${p.schedule_time}`).join('\n');
+           pendingCancels.map(c => `• ${c.context} at ${ukTime(c.schedule_time)}`).join('\n');
   }
-
-  if (failed.length === 1)     out += `\n\n⚠️ Couldn't save ${failed[0].label} — ${failed[0].reason}`;
-  else if (failed.length > 1)  out += `\n\n⚠️ Couldn't save:\n${failed.map(f => `• ${f.label} — ${f.reason}`).join('\n')}`;
-
-  if (failed.length) console.error(`⚠️  Reported ${failed.length} write failure(s) to the user`);
   return out;
 }
 
@@ -1631,7 +2010,11 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
       receipt.failed.push({ label: `reminder "${r.context}"`, reason: error.message });
     } else {
       console.log(`⏰ Reminder saved: "${r.context}" at ${scheduleTime} (${r.frequency || 'once'}) for ${profile.whatsapp_number}`);
-      receipt.saved.push(`reminder "${r.context}" at ${scheduleTime}${r.frequency && r.frequency !== 'once' ? ` (${r.frequency})` : ''}`);
+      (receipt.reminders = receipt.reminders || []).push({
+        time: scheduleTime,
+        date: r.start_date || today,
+        what: r.context,
+      });
     }
   }
 
@@ -1977,21 +2360,31 @@ app.post('/save-profile', async (req, res) => {
 
     // 2. Upsert profiles — preserve any documents already uploaded via /upload
     const { data: existing } = await supabase
-      .from('profiles').select('documents').eq('whatsapp_number', phone).maybeSingle();
+      .from('profiles').select('documents, children').eq('whatsapp_number', phone).maybeSingle();
+    const existingChildren = existing?.children || [];
 
     const { error: profErr } = await supabase.from('profiles').upsert({
       whatsapp_number: phone,
       mum_name,
-      children: children.map(c => ({
-        name:          c.name,
-        age:           Number(c.age) || null,
-        school:        c.school        || '',
-        year_group:    '',
-        dietary_needs: '',
-        allergies:     '',
-        activities:    c.activities    || '',
-        extra_needs:   '',
-      })),
+      // Preserve what the form now collects, and never blank a field the form
+      // did not send — re-saving used to wipe year_group and would have wiped
+      // teacher, which are the fields child matching depends on.
+      children: children.map(c => {
+        const prior = (existingChildren || []).find(
+          k => (k.name || '').toLowerCase() === String(c.name || '').toLowerCase()
+        ) || {};
+        return {
+          name:          c.name,
+          age:           Number(c.age) || prior.age || null,
+          school:        c.school     || prior.school     || '',
+          year_group:    c.year_group || prior.year_group || '',
+          teacher:       c.teacher    || prior.teacher    || '',
+          dietary_needs: prior.dietary_needs || '',
+          allergies:     prior.allergies     || '',
+          activities:    c.activities || prior.activities || '',
+          extra_needs:   prior.extra_needs   || '',
+        };
+      }),
       household:   {},
       preferences: { extra_notes: activities, briefing_time: '07:30' },
       notes:       [],
@@ -2059,17 +2452,37 @@ app.post('/webhook', async (req, res) => {
       return res.send(buildTwimlResponse(msg));
     }
 
-    // Handle image attachments — extract text via Claude vision
+    // Handle image attachments. Only MediaUrl0 used to be read, so forwarding
+    // three invitations processed one and silently discarded the rest — which is
+    // why a batch could be reported as fully handled when it was not.
+    const mediaFailures = [];
     if (numMedia > 0) {
-      const mediaUrl    = req.body.MediaUrl0;
-      const contentType = req.body.MediaContentType0 || 'image/jpeg';
-      console.log(`🖼️  Downloading image (${contentType}): ${mediaUrl}`);
-      const { buffer, contentType: detected } = await downloadTwilioMedia(mediaUrl);
-      const extracted = await extractTextFromImage(buffer, detected || contentType);
-      console.log(`📝 Image text extracted (${extracted.length} chars)`);
-      body = body
-        ? `${body}\n\n[Forwarded image — extracted text:\n${extracted}]`
-        : `[Forwarded image — extracted text:\n${extracted}]`;
+      console.log(`🖼️  ${numMedia} image(s) attached — processing all of them`);
+      for (let m = 0; m < numMedia; m++) {
+        const mediaUrl    = req.body[`MediaUrl${m}`];
+        const contentType = req.body[`MediaContentType${m}`] || 'image/jpeg';
+        if (!mediaUrl) {
+          console.error(`❌ NumMedia says ${numMedia} but MediaUrl${m} is missing — image ${m + 1} cannot be read`);
+          mediaFailures.push({ index: m + 1, reason: 'Twilio did not provide a URL for it' });
+          continue;
+        }
+        try {
+          console.log(`🖼️  Downloading image ${m + 1}/${numMedia} (${contentType})`);
+          const { buffer, contentType: detected } = await downloadTwilioMedia(mediaUrl);
+          const extracted = await extractTextFromImage(buffer, detected || contentType);
+          console.log(`📝 Image ${m + 1}/${numMedia}: extracted ${extracted.length} chars`);
+          const label = numMedia > 1 ? `Forwarded image ${m + 1} of ${numMedia}` : 'Forwarded image';
+          body = body
+            ? `${body}\n\n[${label} — extracted text:\n${extracted}]`
+            : `[${label} — extracted text:\n${extracted}]`;
+        } catch (e) {
+          console.error(`❌ Image ${m + 1}/${numMedia} could not be read: ${e.message}`);
+          mediaFailures.push({ index: m + 1, reason: e.message });
+        }
+      }
+      if (mediaFailures.length) {
+        console.error(`❌ ${mediaFailures.length} of ${numMedia} image(s) failed — the user will be told which`);
+      }
     }
 
     if (!body.trim()) {
@@ -2087,7 +2500,7 @@ app.post('/webhook', async (req, res) => {
     // These are AWAITED, not fired and forgotten. The reply must not be composed
     // before the system knows what was actually written — otherwise any claim it
     // makes about saving is a guess about work still in flight.
-    let writeReceipt = { saved: [], failed: [] };
+    let writeReceipt = { saved: [], failed: [], mediaFailures };
     if (profile) {
       // conversations[from] holds prior turns only — getClaudeReply appends the
       // current message later — so pass `body` separately as the new message.
@@ -2109,10 +2522,15 @@ app.post('/webhook', async (req, res) => {
         console.log(`   Removal detected — discarding ${reminderResult.saved.length} reminder write(s) and ${reminderResult.failed.length} failure(s) from the same message`);
       }
       writeReceipt = {
-        saved:   [...infoResult.saved,  ...(isRemoval ? [] : reminderResult.saved)],
-        failed:  [...infoResult.failed, ...(isRemoval ? [] : reminderResult.failed)],
-        removed: infoResult.removed || [],
+        saved:      [...infoResult.saved,  ...(isRemoval ? [] : reminderResult.saved)],
+        failed:     [...infoResult.failed, ...(isRemoval ? [] : reminderResult.failed)],
+        removed:    infoResult.removed || [],
+        duplicates: infoResult.duplicates || [],
+        proposals:  infoResult.proposals || [],
+        reminders:  isRemoval ? [] : (reminderResult.reminders || []),
         pendingCancels: infoResult.pendingCancels || [],
+        clarify:    infoResult.clarify || null,
+        mediaFailures,
       };
     } else {
       // No profile means reminders are never even attempted — make that loud, and
@@ -2166,8 +2584,14 @@ app.post('/webhook', async (req, res) => {
       ? await resolvePendingCancels(profile.whatsapp_number, body)
       : '';
 
+    // Same guard: don't let a "yes" in the message that CREATED a proposal
+    // confirm something the user has not been shown yet.
+    const profileNotice = (profile && !(writeReceipt.proposals || []).length)
+      ? await resolvePendingProfileChanges(profile.whatsapp_number, body)
+      : '';
+
     res.type('text/xml');
-    res.send(buildTwimlResponse(staleNotice + reply + formatWriteReceipt(writeReceipt) + cancelNotice));
+    res.send(buildTwimlResponse(staleNotice + reply + formatWriteReceipt(writeReceipt) + cancelNotice + profileNotice));
   } catch (err) {
     console.error('❌ Error:', err.message);
     res.type('text/xml');

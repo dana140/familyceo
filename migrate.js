@@ -180,15 +180,28 @@ alter table google_tokens enable row level security;
 -- and refresh tokens. Re-run safe, and deliberately re-applied on every deploy
 -- so the closed state cannot drift open.
 do $$
-declare t text;
+declare
+  t       text;
+  pol     text;
+  dropped int := 0;
 begin
   foreach t in array array['profiles','reminders','user_profiles','google_tokens','pending_profile_changes'] loop
     execute format('revoke all on table public.%I from anon', t);
     execute format('revoke all on table public.%I from authenticated', t);
     execute format('grant all on table public.%I to service_role', t);
     execute format('alter table public.%I enable row level security', t);
+
+    -- Drop EVERY policy on the table, whatever it is called. Matching by name
+    -- is case-sensitive and silently does nothing when it misses: a policy
+    -- named "ALLOW ALL" survived a drop of "Allow all" with no error at all.
+    -- Enumerating leaves nothing to spell wrong.
+    for pol in select polname from pg_policy where polrelid = format('public.%I', t)::regclass loop
+      execute format('drop policy %I on public.%I', pol, t);
+      dropped := dropped + 1;
+      raise notice 'migrate: dropped policy %% on %%', pol, t;
+    end loop;
   end loop;
-  raise notice 'migrate: data tables locked to service_role; anon and authenticated revoked';
+  raise notice 'migrate: data tables locked to service_role; anon and authenticated revoked; %% policy(ies) dropped', dropped;
 end $$;
 
 -- No permissive policy. RLS is on with NO policy, so every role that does not

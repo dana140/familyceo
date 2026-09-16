@@ -18,13 +18,39 @@ revoke all on table public.pending_profile_changes  from anon, authenticated;
 revoke all on schema public from anon, authenticated;
 alter default privileges in schema public revoke all on tables from anon, authenticated;
 
--- 2. Drop the permissive policies. RLS with NO policy denies every role that
---    does not bypass it; service_role bypasses RLS, so the backend is unaffected.
+-- 2. Drop EVERY policy on these tables, whatever it is called. Policy names are
+--    case-sensitive, and `drop policy if exists` fails SILENTLY when the name
+--    does not match — a policy named "ALLOW ALL" survived a drop of "Allow all"
+--    with no error. Enumerating leaves nothing to spell wrong.
+--    RLS with NO policy denies every role that does not bypass it; service_role
+--    bypasses RLS, so the backend is unaffected.
+do $$
+declare r record;
+begin
+  for r in
+    select n.nspname, c.relname, p.polname
+    from pg_policy p
+    join pg_class c     on c.oid = p.polrelid
+    join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public'
+      and c.relname in ('profiles','reminders','user_profiles','google_tokens','pending_profile_changes')
+  loop
+    execute format('drop policy %I on %I.%I', r.polname, r.nspname, r.relname);
+    raise notice 'dropped policy % on %', r.polname, r.relname;
+  end loop;
+end $$;
+
+-- Belt and braces for the two names we know were used.
 drop policy if exists "Allow all" on public.profiles;
+drop policy if exists "ALLOW ALL" on public.profiles;
 drop policy if exists "Allow all" on public.reminders;
+drop policy if exists "ALLOW ALL" on public.reminders;
 drop policy if exists "Allow all" on public.user_profiles;
+drop policy if exists "ALLOW ALL" on public.user_profiles;
 drop policy if exists "Allow all" on public.google_tokens;
+drop policy if exists "ALLOW ALL" on public.google_tokens;
 drop policy if exists "Allow all" on public.pending_profile_changes;
+drop policy if exists "ALLOW ALL" on public.pending_profile_changes;
 
 -- 3. Make sure the backend keeps full access.
 grant all on table public.profiles                to service_role;

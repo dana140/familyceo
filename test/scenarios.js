@@ -25,6 +25,7 @@ const helpers = [
   'function prepReminderDate(', 'function daysBefore(', 'function valuesDiffer(',
   'function normaliseSchool(', 'function normaliseYear(', 'function matchChild(',
   'function signalsFromMessage(', 'function applyChildAuthority(', 'function parseModelJson(',
+  'function matchChildrenByYearRange(', 'function cleanTitle(', 'function friendlyFailure(',
 ].map(grab).join('\n\n');
 eval(helpers);
 const PREP_TIME = '19:00';
@@ -165,6 +166,56 @@ tracksuit bottoms, trainers, a navy cap and a named water bottle.`;
   check('confident', m4e.confident === true, m4e.reason);
   const crossed = matchChild(profile.children, { school: 'Kerem', year_group: '2', text: 'Kerem Year 2' });
   check('Kerem + Year 2 contradicts both → not confident', crossed.confident === false, crossed.reason);
+
+  // ── 6. Questions must never save anything ─────────────────────────────────
+  console.log('\n─── 6. Questions create nothing ───');
+  const qGate = grab('const QUESTION_OPENERS') + '\n' + grab('const IMPERATIVE_SAVE');
+  const QUESTION_OPENERS = /^\\s*(what|when|where|which|who|whose|why|how|is|are|was|were|do|does|did|can|could|would|will|should|have|has|any|anything|remind me what|tell me)\\b/i;
+  const IMPERATIVE_SAVE  = /\\b(remind me to|remind me at|set a reminder|add|save|note|book|put .* in|don'?t let me forget)\\b/i;
+  const fastKind = (t) => {
+    const looksQ = QUESTION_OPENERS.test(t) || t.trim().endsWith('?');
+    const looksS = IMPERATIVE_SAVE.test(t);
+    if (looksQ && !looksS && t.length < 120) return 'question';
+    if (looksS && !looksQ) return 'information';
+    if (!looksQ && t.length > 200) return 'information';
+    return 'ambiguous';
+  };
+  for (const q of ["What's on tomorrow?", 'Anything this week?', 'What do I need for Thursday?', 'What time is Ellie PE?']) {
+    check(`question: ${JSON.stringify(q)}`, fastKind(q) === 'question', `classified ${fastKind(q)}`);
+  }
+  for (const i of ['Remind me to buy a present on Friday', "Lexie has gymnastics on Thursdays now"]) {
+    check(`information: ${JSON.stringify(i)}`, fastKind(i) !== 'question', `classified ${fastKind(i)}`);
+  }
+
+  // ── 7. Multi-child year ranges ────────────────────────────────────────────
+  console.log('\n─── 7. "years 1 to 7" covers both children ───');
+  const succah = 'succah crawl for Bnei Akiva 5787! 27th Sep, 3.00-5.30pm from HGSS for years 1 to 7';
+  const range = matchChildrenByYearRange(profile.children, succah);
+  check('both children matched', !!range && range.names.length === 2, range ? range.names.join(' + ') : 'no match');
+  check('Ellie (Y4) included', !!range && range.names.includes('Ellie'));
+  check('Lexie (Y2) included', !!range && range.names.includes('Lexie'));
+  const rangeItems = [{ title: 'Bnei Akiva Sukkah Crawl', date: '2026-09-27', child: 'Ellie' }];
+  const rAuth = applyChildAuthority(rangeItems, succah, profile.children, () => {});
+  check('one note, not two', rAuth.items.length === 1);
+  check('note carries both children', JSON.stringify(rangeItems[0].children) === '["Ellie","Lexie"]', JSON.stringify(rangeItems[0].children));
+  check('Lily (no year group) excluded', !range.names.includes('Lily'));
+
+  // ── 8. No raw output reaches the user ─────────────────────────────────────
+  console.log('\n─── 8. Raw output is suppressed ───');
+  check('ISO stripped from title', cleanTitle('Ellie Year 2 field trip to Fryent Park — 2026-09-24') === 'Ellie Year 2 field trip to Fryent Park',
+        cleanTitle('Ellie Year 2 field trip to Fryent Park — 2026-09-24'));
+  check('long-form date stripped', cleanTitle("Joshua's 7th Birthday Party — 8 Nov 2026") === "Joshua's 7th Birthday Party",
+        cleanTitle("Joshua's 7th Birthday Party — 8 Nov 2026"));
+  check('clean title untouched', cleanTitle('Bnei Akiva Sukkah Crawl') === 'Bnei Akiva Sukkah Crawl');
+  check('internal error hidden', friendlyFailure('unusable time null') === "I couldn't tell what time you meant", friendlyFailure('unusable time null'));
+  check('db error hidden', !/duplicate key|constraint/i.test(friendlyFailure('duplicate key value violates unique constraint')));
+  check('unknown error still safe', friendlyFailure('ECONNRESET at line 42') === 'something went wrong on my end');
+
+  // ── 9. Prep timing ────────────────────────────────────────────────────────
+  console.log('\n─── 9. Prep reminders move to 7pm the night before ───');
+  check('succah crawl prep → 26 Sep 19:00', prepReminderDate('2026-09-27') === '2026-09-26' && PREP_TIME === '19:00',
+        `${ukDate(prepReminderDate('2026-09-27'))} at ${ukTime(PREP_TIME)}`);
+  check('present → 3 days before', daysBefore('2026-11-01', 3) === '2026-10-29', ukDate(daysBefore('2026-11-01', 3)));
 
   // ── 5. Regression: no invented mismatch ───────────────────────────────────
   console.log('\n─── 5. RSVP number comparison (code, not model) ───');

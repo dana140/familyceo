@@ -624,6 +624,32 @@ async function handleOnboarding(phone, body, state) {
   return NUDGE_MSG;
 }
 
+// Titles are shown to the user, so an ISO date inside one leaks into the reply.
+// The prompt now forbids it, but models drift — strip it on the way in too.
+function cleanTitle(title) {
+  return String(title || '')
+    .replace(/\s*[—–-]\s*\d{4}-\d{2}-\d{2}\s*$/, '')            // "— 2026-09-24"
+    .replace(/\s*\(?\b\d{4}-\d{2}-\d{2}\b\)?/g, '')             // any bare ISO date
+    .replace(/\s*[—–-]\s*\d{1,2}\s+\w{3,9}\s+\d{4}\s*$/, '')    // "— 8 Nov 2026"
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s*[—–-]\s*$/, '')
+    .trim();
+}
+
+// Internal database and validation errors must never reach the user. They are
+// logged in full; the user gets something they can act on.
+function friendlyFailure(reason) {
+  const r = String(reason || '').toLowerCase();
+  if (r.includes('unusable time') || r.includes('schedule_time')) return "I couldn't tell what time you meant";
+  if (r.includes('duplicate key') || r.includes('unique constraint')) return 'it looks like that is already saved';
+  if (r.includes('not-null') || r.includes('null value'))            return 'some details were missing';
+  if (r.includes('permission denied') || r.includes('jwt'))          return "I couldn't reach your data just then";
+  if (r.includes('could not read the extraction'))                   return "I couldn't make sense of that one";
+  if (r.includes('not an updatable field'))                          return "that is not something I can change myself";
+  if (r.includes('no child named'))                                  return "I wasn't sure which child that was about";
+  return 'something went wrong on my end';
+}
+
 // ── Formatting + duplicate + timing helpers ───────────────────────────────────
 // UK throughout. "2026-09-24" is not something to show a person.
 function ukDate(iso) {
@@ -706,6 +732,20 @@ function normaliseYear(v) {
   return m ? m[0] : '';
 }
 
+// Some messages apply to several children at once — "years 1 to 7" covers both
+// a Year 4 and a Year 2. Returns every child whose year group falls in the range.
+function matchChildrenByYearRange(children, text) {
+  const m = String(text || '').match(/years?\s*(\d{1,2})\s*(?:to|-|–|—|and)\s*(\d{1,2})/i);
+  if (!m) return null;
+  const lo = Math.min(Number(m[1]), Number(m[2]));
+  const hi = Math.max(Number(m[1]), Number(m[2]));
+  const hit = (children || []).filter(c => {
+    const y = Number(normaliseYear(c.year_group));
+    return Number.isFinite(y) && y >= lo && y <= hi;
+  });
+  return hit.length ? { names: hit.map(c => c.name), range: `years ${lo}-${hi}` } : null;
+}
+
 // Returns { match, candidates, reason, confident }.
 // `confident` is false whenever the caller must ask rather than assume.
 function matchChild(children, signals) {
@@ -785,6 +825,16 @@ function signalsFromMessage(message, children) {
 // settle it, nothing is saved and the user is asked.
 function applyChildAuthority(items, message, children, onClarify) {
   const sig = signalsFromMessage(message, children);
+
+  // A year RANGE applies to every child inside it. One note listing both is the
+  // right shape — saving the same event twice, once per child, is not.
+  const range = matchChildrenByYearRange(children, message);
+  if (range) {
+    console.log(`   Year range detected (${range.range}) → applies to ${range.names.join(' and ')}`);
+    for (const it of items) { it.children = range.names; it.child = range.names[0]; }
+    return { items, overridden: 0, blocked: false, multi: range.names };
+  }
+
   const hasSignals = !!(sig.school || sig.year_group || sig.teacher);
   if (!hasSignals) return { items, overridden: 0, blocked: false };
 
@@ -798,6 +848,7 @@ function applyChildAuthority(items, message, children, onClarify) {
         overridden++;
       }
       it.child = decided.match.name;
+      it.children = [decided.match.name];
     }
     if (!overridden) console.log(`   Child confirmed by matcher: ${decided.reason}`);
     return { items, overridden, blocked: false };
@@ -811,6 +862,62 @@ function applyChildAuthority(items, message, children, onClarify) {
   console.warn(`❓ CHILD AMBIGUOUS — ${decided.reason}. Saving nothing; asking instead.`);
   onClarify(`${sig.school ? `This looks like a ${sig.school} message` : 'This one'}${sig.year_group ? ` for Year ${sig.year_group}` : ''}. ${q}`);
   return { items: [], overridden: 0, blocked: true };
+}
+
+// ── Intent gate ───────────────────────────────────────────────────────────────
+// Nothing decided whether a message was a QUESTION before extraction ran, so
+// "What's on tomorrow?" was saved as a calendar event and a reminder was
+// attempted from it. A question asks about existing data; it never creates any.
+// Obvious cases are settled by pattern so most messages cost no extra call;
+// anything unclear is classified by the model.
+const QUESTION_OPENERS = /^\s*(what|when|where|which|who|whose|why|how|is|are|was|were|do|does|did|can|could|would|will|should|have|has|any|anything|remind me what|tell me)\b/i;
+const IMPERATIVE_SAVE  = /\b(remind me to|remind me at|set a reminder|add|save|note|book|put .* in|don'?t let me forget)\b/i;
+
+async function classifyIntent(message) {
+  const text = String(message || '').trim();
+  if (!text) return { kind: 'question', why: 'empty message' };
+
+  // A message carrying an attachment is information by definition.
+  if (/\[Forwarded image/i.test(text)) return { kind: 'information', why: 'forwarded image' };
+
+  const looksQuestion = QUESTION_OPENERS.test(text) || text.endsWith('?');
+  const looksSave     = IMPERATIVE_SAVE.test(text);
+
+  // Clear question: short, interrogative, no imperative to save anything.
+  if (looksQuestion && !looksSave && text.length < 120) {
+    return { kind: 'question', why: 'interrogative with no save instruction' };
+  }
+  // Clear information: an explicit save instruction and not phrased as a question.
+  if (looksSave && !looksQuestion) {
+    return { kind: 'information', why: 'explicit save instruction' };
+  }
+  // Long messages with no question marker are almost always forwarded content.
+  if (!looksQuestion && text.length > 200) {
+    return { kind: 'information', why: 'long message, not interrogative' };
+  }
+
+  // Ambiguous — ask the model. Cheap, and only for the genuinely unclear.
+  try {
+    const r = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001', max_tokens: 60,
+      messages: [{ role: 'user', content:
+`Message from a user to their family assistant: "${text.slice(0, 600)}"
+
+Is this ASKING about information the assistant already holds, or TELLING it something new to remember?
+A question asks and stores nothing. Information contains a fact, event, or instruction to save.
+A message can be both — if it contains any new fact to save, answer "information".
+
+Reply with one word: question OR information` }],
+    });
+    const verdict = r.content[0].text.trim().toLowerCase();
+    return verdict.startsWith('question')
+      ? { kind: 'question', why: 'model classified as a question' }
+      : { kind: 'information', why: 'model classified as information' };
+  } catch (e) {
+    // Never block a save because the classifier failed.
+    console.error(`⚠️  Intent classification failed: ${e.message} — treating as information`);
+    return { kind: 'information', why: 'classifier error, defaulted to saving' };
+  }
 }
 
 // ── Info extractor ────────────────────────────────────────────────────────────
@@ -961,7 +1068,9 @@ REMOVAL RULES:
 IMPORTANT DATE RULES:
 - Always resolve relative dates to absolute YYYY-MM-DD using today's date (${today})
 - "tomorrow" = day after today, "this Wednesday" = the coming Wednesday, "next Tuesday" = Tuesday of next week, etc.
-- Include the resolved date in the title so it reads clearly on its own (e.g. "Ellie school trip — 9 Jun", "Plumber visit — 5 Jun", not "school trip next Tuesday")
+- Put the date ONLY in the "date" field. Do NOT put a date in the title — the title is
+  shown to the user and the date is formatted separately. Write "Ellie school trip to
+  Fryent Park", never "Ellie school trip — 2026-09-24" or "school trip next Tuesday".
 - If no date is mentioned, set date to null
 
 Return ONLY valid JSON, no markdown, no explanation:
@@ -1077,6 +1186,7 @@ If no new info, return: {"has_new_info": false, "notes": [], "profile_updates": 
 
     const newNotes = fresh.map(n => ({
       ...n,
+      title: cleanTitle(n.title),
       saved_at: today,
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     }));
@@ -1404,9 +1514,10 @@ function formatWriteReceipt(receipt) {
   // reminder payloads — this is read by a person on a phone.
   for (const item of saved) {
     if (typeof item === 'string') { lines.push(`Added: ${item}`); continue; }
-    const who  = item.child ? `${item.child}'s ` : '';
+    const kids = Array.isArray(item.children) && item.children.length ? item.children : (item.child ? [item.child] : []);
+    const who  = kids.length === 1 ? `${kids[0]}'s ` : kids.length > 1 ? `${kids.slice(0, -1).join(', ')} and ${kids[kids.length - 1]}'s ` : '';
     const when = item.date ? `, ${ukDate(item.date)}` : '';
-    lines.push(`Added to the calendar: ${who}${item.title}${when}`.replace(/\s+,/g, ','));
+    lines.push(`Added to the calendar: ${who}${cleanTitle(item.title)}${when}`.replace(/\s+,/g, ','));
   }
   for (const r of reminders) {
     lines.push(`I'll remind you at ${ukTime(r.time)} on ${ukDate(r.date)}${r.what ? ` — ${r.what}` : ''}`);
@@ -1423,8 +1534,8 @@ function formatWriteReceipt(receipt) {
       mediaFailures.map(m => `• Image ${m.index} — ${m.reason}`).join('\n');
   }
   if (failed.length) {
-    out += `\n\n⚠️ I couldn't save:\n` + failed.map(f => `• ${f.label} — ${f.reason}`).join('\n');
-    console.error(`⚠️  Reported ${failed.length} write failure(s) to the user`);
+    out += `\n\n⚠️ I couldn't save:\n` + failed.map(f => `• ${cleanTitle(f.label)} — ${friendlyFailure(f.reason)}`).join('\n');
+    for (const f of failed) console.error(`⚠️  Reported failure to user: ${f.label} — INTERNAL: ${f.reason}`);
   }
   if (receipt.clarify) {
     out += `\n\n❓ ${receipt.clarify} (Nothing saved yet — tell me which and I'll add it.)`;
@@ -1894,6 +2005,12 @@ Decide what the NEW USER MESSAGE means for the user's reminders.
   "cancel swimming"), return has_reminder false. Cancellation is decided in one
   place elsewhere and confirmed with the user first — do not act on it here.
 - If it is not about reminders at all → return has_reminder false.
+- "kind" describes what the reminder is FOR. Use "prep" for anything that needs doing
+  BEFORE an event (pack the PE kit, bring a form, buy a present). Use "event" only when
+  the user wants pinging at the moment the thing happens. When in doubt for a school
+  trip, party or activity, it is "prep".
+- For a prep reminder give schedule_time as the EVENT's time; the correct advance
+  timing is applied afterwards in code, not by you.
 
 Return ONLY valid JSON, no commentary before or after:
 {
@@ -1901,6 +2018,7 @@ Return ONLY valid JSON, no commentary before or after:
   "reminders": [
     {
       "action": "create" | "update",
+      "kind": "prep | event | rsvp | present | other — prep means getting ready for something (kit, forms, presents to buy, things to pack)",
       "id": "existing reminder id — required for update, null for create",
       "context": "what to generate/send — be specific, e.g. 'a short maths exercise for Ellie about Time'",
       "schedule_time": "HH:MM in 24h",
@@ -1966,7 +2084,27 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
       continue;
     }
 
-    const scheduleTime = normaliseScheduleTime(r.schedule_time);
+    // Prep reminders belong the evening before, presents a few days before. These
+    // rules were written and unit-tested but never wired in, so schedule_time came
+    // straight from the model — which is why a succah crawl reminder landed at
+    // 15:00, the moment it started, instead of the night before.
+    let scheduleTime = normaliseScheduleTime(r.schedule_time);
+    let startDate    = r.start_date || today;
+    const kind = String(r.kind || '').toLowerCase();
+
+    if (action !== 'cancel' && (kind === 'prep' || kind === 'present' || kind === 'rsvp')) {
+      const eventDate = r.start_date;
+      const shifted = kind === 'present' ? daysBefore(eventDate, 3)
+                    : kind === 'rsvp'    ? daysBefore(eventDate, 2)
+                    : prepReminderDate(eventDate);
+      if (shifted) {
+        console.log(`   ⏱️  ${kind} reminder moved from ${eventDate} ${scheduleTime || '(no time)'} → ${shifted} ${PREP_TIME}`);
+        startDate    = shifted;
+        scheduleTime = PREP_TIME;
+      } else {
+        console.warn(`   ⚠️  ${kind} reminder could not be shifted — no usable event date (${JSON.stringify(eventDate)})`);
+      }
+    }
     if (!scheduleTime) {
       console.error(`❌ Reminder DROPPED for ${profile.whatsapp_number} — unusable schedule_time ${JSON.stringify(r.schedule_time)}`);
       console.error(`   Action was "${action}", context "${r.context}"`);
@@ -2013,7 +2151,7 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
       type:            'reminder',
       schedule_time:   scheduleTime,
       frequency:       r.frequency || 'once',
-      start_date:      r.start_date || today,
+      start_date:      startDate,
       end_date:        r.end_date   || null,
       active:          true,
     });
@@ -2028,7 +2166,7 @@ If no reminder found: {"has_reminder": false, "reminders": []}`,
       console.log(`⏰ Reminder saved: "${r.context}" at ${scheduleTime} (${r.frequency || 'once'}) for ${profile.whatsapp_number}`);
       (receipt.reminders = receipt.reminders || []).push({
         time: scheduleTime,
-        date: r.start_date || today,
+        date: startDate,
         what: r.context,
       });
     }
@@ -2517,7 +2655,11 @@ app.post('/webhook', async (req, res) => {
     // before the system knows what was actually written — otherwise any claim it
     // makes about saving is a guess about work still in flight.
     let writeReceipt = { saved: [], failed: [], mediaFailures };
-    if (profile) {
+    const intent = profile ? await classifyIntent(body) : { kind: 'question', why: 'no profile' };
+    if (profile && intent.kind === 'question') {
+      console.log(`   💬 Question, not new information (${intent.why}) — no extraction, nothing saved`);
+    }
+    if (profile && intent.kind !== 'question') {
       // conversations[from] holds prior turns only — getClaudeReply appends the
       // current message later — so pass `body` separately as the new message.
       const [infoResult, reminderResult] = await Promise.all([

@@ -2554,9 +2554,43 @@ app.post('/save-profile', async (req, res) => {
   }
 });
 
+// Twilio abandons a webhook after ~15s and RETRIES it. The AI path makes several
+// sequential model calls and can exceed that, which produces two failures at
+// once: the user gets no reply, and the retry processes the same message a
+// second time — four birthday invitations were saved twice within seconds of
+// each other, 4 to 7 seconds apart, which is exactly that signature.
+// So: acknowledge Twilio at once, do the work afterwards, and send the answer
+// as its own message.
+const recentMessageSids = new Map();   // MessageSid -> timestamp
+const SID_TTL_MS = 10 * 60 * 1000;
+
+function ackTwilio(res, startedAt) {
+  if (res.headersSent) return;
+  res.type('text/xml');
+  res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+  console.log(`   ⏩ Acknowledged Twilio in ${Date.now() - startedAt}ms — composing the reply now`);
+}
+
+function alreadyHandled(sid) {
+  if (!sid) return false;
+  const now = Date.now();
+  for (const [k, t] of recentMessageSids) if (now - t > SID_TTL_MS) recentMessageSids.delete(k);
+  if (recentMessageSids.has(sid)) return true;
+  recentMessageSids.set(sid, now);
+  return false;
+}
+
 // ── WhatsApp webhook ──────────────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
+  const startedAt = Date.now();
   const from     = req.body.From;
+  const messageSid = req.body.MessageSid || req.body.SmsMessageSid;
+
+  if (alreadyHandled(messageSid)) {
+    console.warn(`🔁 DUPLICATE webhook for ${messageSid} from ${from} — already handled, ignoring (this is what saved four invitations twice)`);
+    res.type('text/xml');
+    return res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+  }
   let   body     = req.body.Body || '';
   const numMedia = parseInt(req.body.NumMedia || '0', 10);
   const phone    = normalisePhone(from);
@@ -2586,6 +2620,16 @@ app.post('/webhook', async (req, res) => {
       return res.send(buildTwimlResponse(reply));
     }
 
+    // ── Acknowledge Twilio NOW ────────────────────────────────────────────────
+    // Everything past this point is slow — image download and vision extraction
+    // alone can run for many seconds per attachment, before a single model call
+    // for the reply. Twilio gets an empty TwiML response immediately so it never
+    // times out and never retries; the real answer is sent afterwards over the
+    // REST API, which also routes it through the 1600-char splitter.
+    // The onboarding paths above stay synchronous: they are a database read and
+    // a fixed string, and never come close to the limit.
+    ackTwilio(res, startedAt);
+
     // ── Fully onboarded — AI flow ─────────────────────────────────────────────
     // Test trigger: resend capabilities message
     if (body.trim().toLowerCase() === 'highlighter') {
@@ -2602,8 +2646,10 @@ app.post('/webhook', async (req, res) => {
         `Try me now — what's coming up this week?\n\n` +
         `P.S. You can update your family profile anytime at https://familyceo.netlify.app 🔗`
       );
-      res.type('text/xml');
-      return res.send(buildTwimlResponse(msg));
+      // Past the ack — headers are already sent, so this goes over REST.
+      await sendWhatsApp(from, msg);
+      console.log(`⏱️  Handled 'highlighter' from ${from} in ${Date.now() - startedAt}ms`);
+      return;
     }
 
     // Handle image attachments. Only MediaUrl0 used to be read, so forwarding
@@ -2640,8 +2686,9 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (!body.trim()) {
-      res.type('text/xml');
-      return res.send(buildTwimlResponse("I got your message but couldn't read the content. Could you try sending it as text?"));
+      // Past the ack, so this must go out over REST like every other reply.
+      await sendWhatsApp(from, "I got your message but couldn't read the content. Could you try sending it as text?");
+      return;
     }
 
     const profile = await loadProfile(from);
@@ -2748,12 +2795,27 @@ app.post('/webhook', async (req, res) => {
       ? await resolvePendingProfileChanges(profile.whatsapp_number, body)
       : '';
 
-    res.type('text/xml');
-    res.send(buildTwimlResponse(staleNotice + reply + formatWriteReceipt(writeReceipt) + cancelNotice + profileNotice));
+    const outbound = staleNotice + reply + formatWriteReceipt(writeReceipt) + cancelNotice + profileNotice;
+    await sendWhatsApp(from, outbound);
+
+    const ms = Date.now() - startedAt;
+    console.log(`⏱️  Handled message from ${from} in ${ms}ms (${(ms / 1000).toFixed(1)}s), ${outbound.length} chars`);
+    if (ms > 15000) console.warn(`🐢 SLOW: ${(ms / 1000).toFixed(1)}s — this would have timed out Twilio under the old synchronous flow`);
   } catch (err) {
-    console.error('❌ Error:', err.message);
-    res.type('text/xml');
-    res.send(buildTwimlResponse("Sorry, I hit a snag. Try again in a moment!"));
+    const ms = Date.now() - startedAt;
+    console.error(`❌ Error after ${ms}ms:`, err.message);
+    console.error(err.stack);
+    // The reply is no longer part of the HTTP response, so a throw here means
+    // silence unless we send something. Silence is the failure being fixed.
+    try {
+      await sendWhatsApp(from, "Sorry, I hit a snag on that one. Could you send it again?");
+    } catch (e2) {
+      console.error(`🚨 Could not even send the error message to ${from}: ${e2.message}`);
+    }
+    if (!res.headersSent) {
+      res.type('text/xml');
+      res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    }
   }
 });
 

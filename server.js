@@ -1852,6 +1852,21 @@ async function sendWhatsApp(to, body) {
       });
       delivered.push(i + 1);
     } catch (e) {
+      // 63016: outside WhatsApp's 24-hour customer service window. Every
+      // proactive message — reminders, briefings — hits this once the user has
+      // not messaged for a day, and until templates are approved there is no
+      // way around it. It must never look like a generic send failure.
+      if (e && (e.code === 63016 || /outside.*messaging window|use a Message Template/i.test(e.message || ''))) {
+        console.error(`🚫 BLOCKED BY THE 24-HOUR WINDOW — ${recipient} has not messaged in over 24h.`);
+        console.error(`   WhatsApp only allows approved TEMPLATES outside that window; this was free-form, so it was NOT delivered.`);
+        console.error(`   Message (part ${i + 1}/${parts.length}) began: ${parts[i].slice(0, 160)}`);
+        console.error(`   Fix: submit and use a Meta-approved template (see PRE-LAUNCH.md item 1). Twilio code ${e.code || '63016'}.`);
+        const werr = new Error(`Outside the 24-hour WhatsApp window — a template is required (Twilio ${e.code || 63016})`);
+        werr.outsideWindow = true;
+        werr.partsDelivered = delivered.length;
+        werr.partsTotal = parts.length;
+        throw werr;
+      }
       // A split that half-succeeds is a failure mode splitting itself creates,
       // so it must be impossible to miss in the logs.
       if (delivered.length) {
@@ -2333,6 +2348,11 @@ async function runScheduler() {
       }).eq('id', r.id);
       console.log(`   ✅ Reminder sent to ${profileRow?.mum_name || r.whatsapp_number}`);
     } catch (e) {
+      if (e.outsideWindow) {
+        console.error(`   🚫 Reminder ${r.id} NOT DELIVERED — outside the 24-hour window: "${r.context}"`);
+        console.error(`      Left ACTIVE and unsent so it is not silently lost; it will be retried on the next tick that matches.`);
+        continue;   // deliberately skip the last_sent_at update — nothing was sent
+      }
       console.error(`   ❌ Reminder failed for ${r.whatsapp_number}:`, e.message);
     }
   }
@@ -2359,6 +2379,11 @@ async function runScheduler() {
       }).eq('whatsapp_number', profile.whatsapp_number);
       console.log(`   ✅ Morning briefing sent to ${profile.mum_name}`);
     } catch (e) {
+      if (e.outsideWindow) {
+        console.error(`   🚫 Morning briefing NOT DELIVERED to ${profile.mum_name} — outside the 24-hour window.`);
+        console.error(`      last_briefing_date NOT set, so it is not recorded as sent.`);
+        continue;
+      }
       console.error(`   ❌ Briefing failed for ${profile.mum_name}:`, e.message);
     }
   }

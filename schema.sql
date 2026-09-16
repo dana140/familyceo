@@ -11,6 +11,7 @@ create table if not exists profiles (
   household jsonb default '{}'::jsonb,
   preferences jsonb default '{}'::jsonb,
   last_inbound_at timestamptz,   -- opens WhatsApp's 24h free-form window
+  pending_done_choices jsonb,    -- reminders offered when DONE was ambiguous
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
@@ -52,6 +53,7 @@ create table if not exists reminders (
   stale_notified_at timestamptz, -- set once the user has been told it was dropped
   pending_cancel_at timestamptz,     -- a removal matched this; awaiting user confirmation
   pending_cancel_reason text,        -- what the user said that matched it
+  closed_by_done_at timestamptz,     -- set when DONE closed it; UNDO reopens
   created_at timestamptz default now()
 );
 

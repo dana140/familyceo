@@ -34,6 +34,14 @@ create table if not exists reminders (
   created_at timestamptz default now()
 );
 
+-- Which reminder DONE closed, so UNDO can reopen it.
+alter table reminders add column if not exists closed_by_done_at timestamptz;
+
+-- When DONE is ambiguous the offered reminders are parked here in order, so a
+-- reply of "1" or "2" resolves to the right one. Its own column rather than a
+-- key in preferences, which the scheduler also rewrites.
+alter table profiles add column if not exists pending_done_choices jsonb;
+
 -- When the user last messaged us. WhatsApp's 24-hour customer service window
 -- opens on an inbound message, and nothing recorded that, so there was no way to
 -- know whether a free-form briefing would be accepted or rejected with 63016.

@@ -2864,7 +2864,59 @@ app.post('/webhook', async (req, res) => {
     // a fixed string, and never come close to the limit.
     ackTwilio(res, startedAt);
 
-    // ── Keyword replies ───────────────────────────────────────────────────────
+    // ── DONE / UNDO helpers ───────────────────────────────────────────────────────
+// Reminders sent recently enough that "DONE" plausibly refers to one of them.
+// 18 hours, not 6: prep reminders fire at 7pm and the natural moment to reply
+// DONE is the next morning, which 6 hours would have missed entirely.
+const DONE_LOOKBACK_MS   = 18 * 60 * 60 * 1000;
+// A parked choice must not hijack a later bare number — the morning briefing
+// also says "reply with a number".
+const DONE_CHOICE_TTL_MS = 30 * 60 * 1000;
+
+async function recentlySentReminders(whatsappNumber) {
+  const since = new Date(Date.now() - DONE_LOOKBACK_MS).toISOString();
+  const { data, error } = await supabase
+    .from('reminders')
+    .select('id, context, frequency, last_sent_at')
+    .eq('whatsapp_number', whatsappNumber)
+    .eq('type', 'reminder')
+    .not('last_sent_at', 'is', null)
+    .gte('last_sent_at', since)
+    .order('last_sent_at', { ascending: false })
+    .limit(5);
+  if (error) { console.error(`⚠️  Could not load recent reminders: ${error.message}`); return null; }
+  return data || [];
+}
+
+// A one-off is finished outright. A recurring one is only done for today —
+// last_sent_at already stops it repeating — so the series is left running.
+async function closeReminderAsDone(r) {
+  const patch = { closed_by_done_at: new Date().toISOString() };
+  if (r.frequency === 'once') patch.active = false;
+  const { error } = await supabase.from('reminders').update(patch).eq('id', r.id);
+  if (error) { console.error(`❌ DONE could not close ${r.id}: ${error.message}`); return null; }
+  console.log(`   ✔️  DONE — ${r.frequency === 'once' ? 'closed' : "marked today's"} reminder ${r.id}: "${r.context}"`);
+  return r.frequency === 'once'
+    ? `Done: ${cleanTitle(r.context)} ✅`
+    : `Done for today: ${cleanTitle(r.context)} ✅ (it'll come round again — say "stop reminding me about that" to end it.)`;
+}
+
+async function setPendingDoneChoices(whatsappNumber, list) {
+  const payload = list
+    ? { at: new Date().toISOString(), choices: list.map((r, i) => ({ n: i + 1, id: r.id, context: r.context })) }
+    : null;
+  const { error } = await supabase.from('profiles')
+    .update({ pending_done_choices: payload }).eq('whatsapp_number', whatsappNumber);
+  if (error) console.error(`⚠️  Could not park DONE choices: ${error.message}`);
+}
+
+function freshChoices(parked) {
+  if (!parked?.at || !Array.isArray(parked.choices)) return null;
+  if (Date.now() - new Date(parked.at).getTime() > DONE_CHOICE_TTL_MS) return null;
+  return parked.choices;
+}
+
+// ── Keyword replies ───────────────────────────────────────────────────────
     // These are commands, not information, so they run before any extraction —
     // "MORNING" must never be saved as a note.
     const keyword = body.trim().toUpperCase().replace(/[^A-Z]/g, '');
@@ -2884,45 +2936,94 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+    // A bare number only means a DONE choice if one is parked and still fresh —
+    // otherwise it belongs to the briefing's "reply with a number".
+    if (/^\d{1,2}$/.test(body.trim())) {
+      const profile = await loadProfile(from);
+      const choices = freshChoices(profile?.pending_done_choices);
+      if (profile && choices) {
+        const pick = choices.find(c => c.n === Number(body.trim()));
+        if (!pick) {
+          await sendWhatsApp(from, `I don't have a ${body.trim()} on that list. Reply with one of: ${choices.map(c => c.n).join(', ')}`);
+          return;
+        }
+        const { data: r, error } = await supabase.from('reminders')
+          .select('id, context, frequency').eq('id', pick.id).single();
+        if (error || !r) {
+          console.error(`❌ DONE choice ${pick.id} could not be loaded: ${error?.message}`);
+          await sendWhatsApp(from, "I couldn't find that reminder any more — try DONE again?");
+          await setPendingDoneChoices(profile.whatsapp_number, null);
+          return;
+        }
+        const msg = await closeReminderAsDone(r);
+        await setPendingDoneChoices(profile.whatsapp_number, null);
+        await sendWhatsApp(from, msg || "I couldn't mark that off just then — try again in a moment?");
+        console.log(`⏱️  DONE choice handled in ${Date.now() - startedAt}ms`);
+        return;
+      }
+      // No parked choice — fall through to the AI flow.
+    }
+
     if (keyword === 'DONE') {
       const profile = await loadProfile(from);
       if (!profile) { await sendWhatsApp(from, "I don't have a profile for this number yet."); return; }
-      const { data: recent, error: rErr } = await supabase
-        .from('reminders')
-        .select('id, context, frequency, last_sent_at')
-        .eq('whatsapp_number', profile.whatsapp_number)
-        .eq('type', 'reminder')
-        .not('last_sent_at', 'is', null)
-        .order('last_sent_at', { ascending: false })
-        .limit(1);
 
-      if (rErr) {
-        console.error(`❌ DONE lookup failed for ${profile.whatsapp_number}: ${rErr.message}`);
+      const recent = await recentlySentReminders(profile.whatsapp_number);
+      if (recent === null) {
         await sendWhatsApp(from, "I couldn't reach your reminders just then — try again in a moment?");
         return;
       }
-      const r = (recent || [])[0];
-      if (!r) {
-        console.log(`   ✔️  DONE from ${profile.mum_name} but no reminder has been sent yet — nothing to close`);
-        await sendWhatsApp(from, "Nothing to mark off — I haven't sent you a reminder yet.");
+      if (!recent.length) {
+        console.log(`   ✔️  DONE from ${profile.mum_name} but nothing was sent in the last ${DONE_LOOKBACK_MS / 3600000}h`);
+        await sendWhatsApp(from, "Nothing to mark off — I haven't sent you a reminder recently.");
         return;
       }
-      // A one-off is finished. A recurring series is not — only today's
-      // occurrence is, and last_sent_at already stops it repeating today.
-      if (r.frequency === 'once') {
-        const { error } = await supabase.from('reminders').update({ active: false }).eq('id', r.id);
-        if (error) {
-          console.error(`❌ DONE could not close reminder ${r.id}: ${error.message}`);
-          await sendWhatsApp(from, "I couldn't mark that off just then — try again in a moment?");
-          return;
-        }
-        console.log(`   ✔️  DONE — closed one-off reminder ${r.id}: "${r.context}"`);
-        await sendWhatsApp(from, `Marked off: ${cleanTitle(r.context)} ✅`);
-      } else {
-        console.log(`   ✔️  DONE — "${r.context}" is a ${r.frequency} reminder, so today's is done but the series continues`);
-        await sendWhatsApp(from, `Marked off for today: ${cleanTitle(r.context)} ✅ (it'll come round again — say "stop reminding me about that" to end it.)`);
+      if (recent.length === 1) {
+        const msg = await closeReminderAsDone(recent[0]);
+        await sendWhatsApp(from, msg || "I couldn't mark that off just then — try again in a moment?");
+        console.log(`⏱️  DONE handled in ${Date.now() - startedAt}ms`);
+        return;
       }
-      console.log(`⏱️  DONE handled in ${Date.now() - startedAt}ms`);
+      // Ambiguous — ask rather than guess which one she means.
+      await setPendingDoneChoices(profile.whatsapp_number, recent);
+      const list = recent.map((r, i) => `${i + 1}. ${cleanTitle(r.context)}`).join('\n');
+      console.log(`   ❓ DONE ambiguous for ${profile.mum_name} — ${recent.length} recent reminders, asking which`);
+      await sendWhatsApp(from, `Which one?\n${list}\n\nReply with the number.`);
+      return;
+    }
+
+    if (keyword === 'UNDO') {
+      const profile = await loadProfile(from);
+      if (!profile) { await sendWhatsApp(from, "I don't have a profile for this number yet."); return; }
+      const { data: closed, error } = await supabase
+        .from('reminders')
+        .select('id, context, frequency, closed_by_done_at')
+        .eq('whatsapp_number', profile.whatsapp_number)
+        .not('closed_by_done_at', 'is', null)
+        .order('closed_by_done_at', { ascending: false })
+        .limit(1);
+      if (error) {
+        console.error(`❌ UNDO lookup failed: ${error.message}`);
+        await sendWhatsApp(from, "I couldn't reach your reminders just then — try again in a moment?");
+        return;
+      }
+      const r = (closed || [])[0];
+      if (!r) {
+        console.log(`   ↩️  UNDO from ${profile.mum_name} but nothing has been marked done`);
+        await sendWhatsApp(from, "There's nothing to undo — you haven't marked anything off.");
+        return;
+      }
+      const patch = { closed_by_done_at: null };
+      if (r.frequency === 'once') patch.active = true;
+      const { error: uErr } = await supabase.from('reminders').update(patch).eq('id', r.id);
+      if (uErr) {
+        console.error(`❌ UNDO could not reopen ${r.id}: ${uErr.message}`);
+        await sendWhatsApp(from, "I couldn't undo that just then — try again in a moment?");
+        return;
+      }
+      console.log(`   ↩️  UNDO — reopened reminder ${r.id}: "${r.context}"`);
+      await sendWhatsApp(from, `Reopened: ${cleanTitle(r.context)} ↩️`);
+      console.log(`⏱️  UNDO handled in ${Date.now() - startedAt}ms`);
       return;
     }
 

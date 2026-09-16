@@ -29,7 +29,11 @@ create trigger profiles_updated_at
 
 -- Row Level Security (open for now — lock down once auth is added)
 alter table profiles enable row level security;
-create policy "Allow all" on profiles for all using (true) with check (true);
+-- No permissive policy on profiles: RLS on with no policy denies every role that
+-- does not bypass it. The backend uses service_role, which does.
+revoke all on table profiles from anon;
+revoke all on table profiles from authenticated;
+grant all on table profiles to service_role;
 
 -- Scheduled reminders
 create table if not exists reminders (
@@ -51,7 +55,11 @@ create table if not exists reminders (
 );
 
 alter table reminders enable row level security;
-create policy "Allow all" on reminders for all using (true) with check (true);
+-- No permissive policy on reminders: RLS on with no policy denies every role that
+-- does not bypass it. The backend uses service_role, which does.
+revoke all on table reminders from anon;
+revoke all on table reminders from authenticated;
+grant all on table reminders to service_role;
 
 -- Onboarding state and completed user profiles
 create table if not exists user_profiles (
@@ -68,7 +76,11 @@ create table if not exists user_profiles (
 );
 
 alter table user_profiles enable row level security;
-create policy "Allow all" on user_profiles for all using (true) with check (true);
+-- No permissive policy on user_profiles: RLS on with no policy denies every role that
+-- does not bypass it. The backend uses service_role, which does.
+revoke all on table user_profiles from anon;
+revoke all on table user_profiles from authenticated;
+grant all on table user_profiles to service_role;
 
 -- Google OAuth tokens
 create table if not exists google_tokens (
@@ -82,4 +94,8 @@ create table if not exists google_tokens (
 );
 
 alter table google_tokens enable row level security;
-create policy "Allow all" on google_tokens for all using (true) with check (true);
+-- No permissive policy on google_tokens: RLS on with no policy denies every role that
+-- does not bypass it. The backend uses service_role, which does.
+revoke all on table google_tokens from anon;
+revoke all on table google_tokens from authenticated;
+grant all on table google_tokens to service_role;

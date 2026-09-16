@@ -91,10 +91,9 @@ create index if not exists pending_profile_changes_open_idx
   on pending_profile_changes (whatsapp_number) where resolved_at is null;
 
 alter table pending_profile_changes enable row level security;
-do $$ begin
-  create policy "Allow all" on pending_profile_changes for all using (true) with check (true);
-exception when duplicate_object then null;
-end $$;
+-- No permissive policy. RLS is on with NO policy, so every role that does not
+-- bypass RLS is denied; the backend uses service_role, which bypasses it.
+-- A "Allow all" policy here previously reopened this table on every deploy.
 -- This project does not auto-grant on new tables (reminders needed the same in
 -- June), and without it the service role gets "permission denied for table".
 -- service_role only. This table holds children's details and is touched solely
@@ -159,10 +158,9 @@ begin
 end $$;
 
 alter table user_profiles enable row level security;
-do $$ begin
-  create policy "Allow all" on user_profiles for all using (true) with check (true);
-exception when duplicate_object then null;
-end $$;
+-- No permissive policy. RLS is on with NO policy, so every role that does not
+-- bypass RLS is denied; the backend uses service_role, which bypasses it.
+-- A "Allow all" policy here previously reopened this table on every deploy.
 
 create table if not exists google_tokens (
   id            uuid        primary key default gen_random_uuid(),
@@ -175,10 +173,27 @@ create table if not exists google_tokens (
 );
 
 alter table google_tokens enable row level security;
-do $$ begin
-  create policy "Allow all" on google_tokens for all using (true) with check (true);
-exception when duplicate_object then null;
+
+-- ── Lock the data tables to the backend ───────────────────────────────────────
+-- anon and authenticated must never reach these: profiles, user_profiles and
+-- reminders hold children's details, and google_tokens holds live OAuth access
+-- and refresh tokens. Re-run safe, and deliberately re-applied on every deploy
+-- so the closed state cannot drift open.
+do $$
+declare t text;
+begin
+  foreach t in array array['profiles','reminders','user_profiles','google_tokens','pending_profile_changes'] loop
+    execute format('revoke all on table public.%I from anon', t);
+    execute format('revoke all on table public.%I from authenticated', t);
+    execute format('grant all on table public.%I to service_role', t);
+    execute format('alter table public.%I enable row level security', t);
+  end loop;
+  raise notice 'migrate: data tables locked to service_role; anon and authenticated revoked';
 end $$;
+
+-- No permissive policy. RLS is on with NO policy, so every role that does not
+-- bypass RLS is denied; the backend uses service_role, which bypasses it.
+-- A "Allow all" policy here previously reopened this table on every deploy.
 `;
 
 async function migrate() {

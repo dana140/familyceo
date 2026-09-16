@@ -198,10 +198,10 @@ begin
     for pol in select polname from pg_policy where polrelid = format('public.%I', t)::regclass loop
       execute format('drop policy %I on public.%I', pol, t);
       dropped := dropped + 1;
-      raise notice 'migrate: dropped policy %% on %%', pol, t;
+      raise notice 'migrate: dropped policy % on %', pol, t;
     end loop;
   end loop;
-  raise notice 'migrate: data tables locked to service_role; anon and authenticated revoked; %% policy(ies) dropped', dropped;
+  raise notice 'migrate: data tables locked to service_role; anon and authenticated revoked; % policy(ies) dropped', dropped;
 end $$;
 
 -- No permissive policy. RLS is on with NO policy, so every role that does not

@@ -39,6 +39,22 @@ const twilioClient  = new twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWI
 // Conversation history per phone number
 const conversations = {};
 
+// Identify WHICH KIND of Supabase key is in use without ever printing it. The
+// deploy logs gave no way to tell whether the new secret key had actually taken
+// effect, which made "is it safe to disable the legacy keys?" unanswerable.
+function describeSupabaseKey(key) {
+  if (!key) return '❌ MISSING';
+  if (key.startsWith('sb_secret_'))      return '✅ sb_secret_ (new secret key)';
+  if (key.startsWith('sb_publishable_')) return '🚨 sb_publishable_ — THIS IS THE PUBLIC KEY, the backend needs the SECRET key';
+  if (key.startsWith('eyJ')) {
+    try {
+      const role = JSON.parse(Buffer.from(key.split('.')[1], 'base64').toString()).role;
+      return `⚠️  legacy JWT (role=${role}) — still on the old key`;
+    } catch { return '⚠️  legacy JWT (role unreadable) — still on the old key'; }
+  }
+  return `⚠️  unrecognised key format (starts "${key.slice(0, 4)}…")`;
+}
+
 // ── Phone normaliser ──────────────────────────────────────────────────────────
 function normalisePhone(raw) {
   let n = (raw || '')
@@ -2671,6 +2687,8 @@ migrate()
       console.log(`   POST http://localhost:${PORT}/webhook`);
       console.log(`   POST http://localhost:${PORT}/upload`);
       console.log(`   ⏰ Scheduler running — checking reminders every minute`);
+      console.log(`   Supabase key: ${describeSupabaseKey(process.env.SUPABASE_SERVICE_KEY)}`);
+      console.log(`   DATABASE_URL: ${process.env.DATABASE_URL ? '✅ set (migrations will run)' : '❌ MISSING (migrations skipped)'}`);
       console.log(`   GOOGLE_CLIENT_ID: ${process.env.GOOGLE_CLIENT_ID ? '✅ set (' + process.env.GOOGLE_CLIENT_ID.slice(0, 8) + '...)' : '❌ MISSING'}`);
       console.log(`   GOOGLE_CLIENT_SECRET: ${process.env.GOOGLE_CLIENT_SECRET ? '✅ set' : '❌ MISSING'}`);
     });

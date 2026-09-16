@@ -95,6 +95,11 @@ do $$ begin
   create policy "Allow all" on pending_profile_changes for all using (true) with check (true);
 exception when duplicate_object then null;
 end $$;
+-- This project does not auto-grant on new tables (reminders needed the same in
+-- June), and without it the service role gets "permission denied for table".
+-- service_role only. This table holds children's details and is touched solely
+-- by the backend; anon and authenticated are deliberately NOT granted.
+grant all on table pending_profile_changes to service_role;
 
 -- Create fresh if it doesn't exist yet
 create table if not exists user_profiles (

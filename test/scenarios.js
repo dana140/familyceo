@@ -157,6 +157,15 @@ tracksuit bottoms, trainers, a navy cap and a named water bottle.`;
   const noSig = applyChildAuthority(plain, 'remind me to call the dentist', profile.children, () => {});
   check('untouched, not blocked', noSig.blocked === false && plain[0].child === 'Ellie');
 
+  // ── 4e. Ellie now has a year group — Kerem Year 4 must reach her ──────────
+  console.log('\n─── 4e. Kerem Year 4 message reaches Ellie, not Lexie ───');
+  const kerem = 'Dear Year 4 Parents at Kerem, swimming gala on 2 October.';
+  const m4e = matchChild(profile.children, { school: 'Kerem', year_group: '4', text: kerem });
+  check('matched Ellie', m4e.match && m4e.match.name === 'Ellie', `got ${m4e.match?.name}`);
+  check('confident', m4e.confident === true, m4e.reason);
+  const crossed = matchChild(profile.children, { school: 'Kerem', year_group: '2', text: 'Kerem Year 2' });
+  check('Kerem + Year 2 contradicts both → not confident', crossed.confident === false, crossed.reason);
+
   // ── 5. Regression: no invented mismatch ───────────────────────────────────
   console.log('\n─── 5. RSVP number comparison (code, not model) ───');
   check('same number, different formatting → no warning', valuesDiffer('07763667378', '0776 366 7378') === false);
